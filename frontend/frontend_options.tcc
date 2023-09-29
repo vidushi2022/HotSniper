@@ -5,7 +5,7 @@ namespace frontend
   
 template <typename T>
 FrontendOptions<T>::FrontendOptions(int argc, const char * argv [])
-{
+{ 
   this-> parsing_error = true;
   this->current_mode = Sift::ModeIcount;
   this->verbose = false;

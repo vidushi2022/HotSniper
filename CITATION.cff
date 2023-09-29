@@ -3,16 +3,24 @@ message: "If you use this software, please cite the paper below."
 preferred-citation:
   type: article
   authors:
-  - family-names: "Anuj"
-    given-names: "Pathania"
-  - family-names: "Jörg"
-    given-names: "Henkel"
-  doi: "10.1109/LES.2018.2866594"
-  journal: "IEEE Embedded Systems Letters"
-  month: 6
-  start: 54 # First page number
-  end: 57 # Last page number
-  title: "HotSniper: Sniper-Based Toolchain for Many-Core Thermal Simulations in Open Systems"
-  issue: 2
-  volume: 11
-  year: 2019
+  - family-names: Siddhu
+    given-names: Lokesh
+  - family-names: Kedia
+    given-names: Rajesh
+  - family-names: Pandey
+    given-names: Shailja
+  - family-names: Rapp
+    given-names: Martin
+  - family-names: Pathania
+    given-names: Anuj
+  - family-names: Henkel
+    given-names: "Jörg"
+  - family-names: Panda
+    given-names: "Preeti Ranjan"
+  url: "http://arxiv.org/abs/2109.12405"
+  journal: arXiv
+  month: 9
+  start: 1 # First page number
+  end: 23 # Last page number
+  title: "CoMeT: An Integrated Interval Thermal Simulation Toolchain for 2D, 2.5D, and 3D Processor-Memory Systems"
+  year: 2021

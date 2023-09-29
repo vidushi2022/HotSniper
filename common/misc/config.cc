@@ -82,7 +82,7 @@ Config::Config(SimulationMode mode)
    else if (Sim()->getCfg()->getBool("general/magic"))
       m_knob_roi = ROI_MAGIC;
    else
-      m_knob_roi = ROI_FULL;
+      m_knob_roi = ROI_FULL; //Setting roi here
 
    m_knob_enable_progress_trace = Sim()->getCfg()->getBool("progress_trace/enabled");
    m_knob_enable_sync = Sim()->getCfg()->getString("clock_skew_minimization/scheme") != "none";

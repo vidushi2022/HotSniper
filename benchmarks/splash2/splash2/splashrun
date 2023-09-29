@@ -10,8 +10,11 @@ class UnsupportedParameter(ValueError): pass
 
 
 def mkNewDir(dirname):
-  os.system('rm -rf ' + dirname)
-  os.makedirs(dirname)
+  #os.system('rm -rf ' + dirname)
+    try:
+        os.makedirs(dirname)
+    except:
+        print "Directory exists, using the same"
 
 
 def run(cmd):
@@ -190,7 +193,8 @@ if __name__ == '__main__':
     if rundir:
       rundir_ = rundir
     else:
-      rundir_ = tempfile.mkdtemp()
+     #rundir_ = tempfile.mkdtemp()
+      rundir_ = os.getcwd()              #local hack to avoid traces being generated in the /tmp
     print '[SPLASH] Setting up run directory:', rundir_
     mkNewDir(rundir_)
     os.chdir(rundir_)
@@ -210,8 +214,8 @@ if __name__ == '__main__':
       ret_codes.append(retcode)
       failed_run = True
     print '[SPLASH]', '[----------    End of output    ----------]'
-    if not rundir:
-      os.system('rm -rf ' + rundir_)
+    #if not rundir:
+    #  os.system('rm -rf ' + rundir_)
     print '[SPLASH]', 'Done.'
     if failed_run:
       sys.exit(ret_codes[0])

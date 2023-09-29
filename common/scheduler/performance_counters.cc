@@ -2,27 +2,23 @@
 
 #include <fstream>
 #include <sstream>
+#include <iostream>
 
 using namespace std;
 
-PerformanceCounters::PerformanceCounters(const char* output_dir, std::string instPowerFileNameParam, std::string instTemperatureFileNameParam, std::string instCPIStackFileNameParam)
-    : instPowerFileName(instPowerFileNameParam), instTemperatureFileName(instTemperatureFileNameParam), instCPIStackFileName(instCPIStackFileNameParam) {
-
-	//gkothar1: fix log file path names
-	std::string temp = instPowerFileName;
-	instPowerFileName = std::string(output_dir);
-	instPowerFileName.append("/");
-	instPowerFileName.append(temp);
-
-	temp = instTemperatureFileName;
-	instTemperatureFileName = std::string(output_dir);
-	instTemperatureFileName.append("/");
-	instTemperatureFileName.append(temp);
-
-	temp = instCPIStackFileName;
-	instCPIStackFileName = std::string(output_dir);
-	instCPIStackFileName.append("/");
-	instCPIStackFileName.append(temp);
+PerformanceCounters::PerformanceCounters(
+	std::string instPowerFileName,
+	std::string instTemperatureFileName,
+	std::string instCPIStackFileName,
+	std::string instRvalueFileName,
+	std::string instVddFileName,
+	std::string instDeltaVthFileName) :
+		instPowerFileName(instPowerFileName),
+		instTemperatureFileName(instTemperatureFileName),
+		instCPIStackFileName(instCPIStackFileName),
+		instRvalueFileName(instRvalueFileName),
+		instVddFileName(instVddFileName),
+		instDeltaVthFileName(instDeltaVthFileName) {
 }
 
 /** getPowerOfComponent
@@ -57,7 +53,7 @@ double PerformanceCounters::getPowerOfComponent (string component) const {
  * Return the latest total power consumption of the given core. Requires "tp" (total power) to be tracked in base.cfg. Return -1 if power is not tracked.
  */
 double PerformanceCounters::getPowerOfCore(int coreId) const {
-	string component = "Core" + std::to_string(coreId) + "-TP";
+	string component = "C_" + std::to_string(coreId);
 	return getPowerOfComponent(component);
 }
 
@@ -89,7 +85,6 @@ double PerformanceCounters::getPeakTemperature () const {
 	return maxTemp;
 }
 
-
 /** getTemperatureOfComponent
     Returns the latest temperature of a component being tracked using base.cfg. Return -1 if power value not found.
 */
@@ -98,10 +93,10 @@ double PerformanceCounters::getTemperatureOfComponent (string component) const {
 	string header;
 	string footer;
 
-  	if (temperatureLogFile.good()) {
+	if (temperatureLogFile.good()) {
 		getline(temperatureLogFile, header);
 		getline(temperatureLogFile, footer);
-  	}
+	}
 
 	std::istringstream issHeader(header);
 	std::istringstream issFooter(footer);
@@ -123,8 +118,39 @@ double PerformanceCounters::getTemperatureOfComponent (string component) const {
  * Return the latest temperature of the given core. Requires "tp" (total power) to be tracked in base.cfg. Return -1 if power is not tracked.
  */
 double PerformanceCounters::getTemperatureOfCore(int coreId) const {
-	string component = "Core" + std::to_string(coreId) + "-TP";
+	string component = "C_" + std::to_string(coreId);
 	return getTemperatureOfComponent(component);
+}
+
+/** getTemperatureOfBank
+ * Return the latest temperature of the given memory bank. Requires "tp" (total power) to be tracked in base.cfg. Return -1 if power is not tracked.
+ */
+double PerformanceCounters::getTemperatureOfBank(int bankId) const {
+	string component = "B_" + std::to_string(bankId);
+	return getTemperatureOfComponent(component);
+}
+
+vector<string> PerformanceCounters::getCPIStackParts() const {
+	ifstream cpiStackLogFile(instCPIStackFileName);
+    string line;
+	std::istringstream issLine;
+
+	vector<string> parts;
+	if (cpiStackLogFile.good()) {
+		getline(cpiStackLogFile, line); // consume first line containing the CSV header
+		getline(cpiStackLogFile, line); // consume second line containing total values
+		while (cpiStackLogFile.good()) {
+			getline(cpiStackLogFile, line);
+			issLine.str(line);
+			issLine.clear();
+			std::string m;
+			getline(issLine, m, '\t');
+			if (m.length() > 0) {
+				parts.push_back(m);
+			}
+		}
+	}
+	return parts;
 }
 
 /**
@@ -139,7 +165,7 @@ double PerformanceCounters::getCPIStackPartOfCore(int coreId, std::string metric
 	// first find the line in the logfile that contains the desired metric
 	bool metricFound = false;
 	while (!metricFound) {
-  		if (cpiStackLogFile.good()) {
+		if (cpiStackLogFile.good()) {
 			getline(cpiStackLogFile, line);
 			issLine.str(line);
 			issLine.clear();
@@ -147,10 +173,10 @@ double PerformanceCounters::getCPIStackPartOfCore(int coreId, std::string metric
 			getline(issLine, m, '\t');
 			metricFound = (m == metric);
 		} else {
-			return -1;
+			return 0;
 		}
 	}
-	
+
 	// then split the coreId-th value from this line (first value is metric name, but already consumed above)
 	std::string value;
 	for (int i = 0; i < coreId + 1; i++) {
@@ -167,7 +193,21 @@ double PerformanceCounters::getCPIStackPartOfCore(int coreId, std::string metric
  * Get the utilization of the given core.
  */
 double PerformanceCounters::getUtilizationOfCore(int coreId) const {
-	return getCPIStackPartOfCore(coreId, "base") / getCPIOfCore(coreId);
+	float cpi = 0;
+	for (const string & part : getCPIStackParts()) {
+		// exclude non-memory-related parts
+		if ((part.find("mem") == std::string::npos) &&
+		    (part.find("ifetch") == std::string::npos) &&
+		    (part.find("sync") == std::string::npos) &&
+		    (part.find("dvfs-transition") == std::string::npos) &&
+		    (part.find("imbalance") == std::string::npos) &&
+		    (part.find("other") == std::string::npos)) {
+
+			cpi += getCPIStackPartOfCore(coreId, part);
+		}
+	}
+	float total = getCPIOfCore(coreId);
+	return cpi / total;
 }
 
 /**
@@ -175,13 +215,6 @@ double PerformanceCounters::getUtilizationOfCore(int coreId) const {
  */
 double PerformanceCounters::getCPIOfCore(int coreId) const {
 	return getCPIStackPartOfCore(coreId, "total");
-}
-
-/**
- * Get the rel. NUCA part of the CPI stack of the given core.
- */
-double PerformanceCounters::getRelNUCACPIOfCore(int coreId) const {
-	return getCPIStackPartOfCore(coreId, "mem-nuca") / getCPIOfCore(coreId);
 }
 
 /**
@@ -207,4 +240,86 @@ void PerformanceCounters::notifyFreqsOfCores(std::vector<int> newFrequencies) {
  */
 double PerformanceCounters::getIPSOfCore(int coreId) const {
 	return 1e6 * getFreqOfCore(coreId) / getCPIOfCore(coreId);
+}
+
+/** getRvalueOfComponent
+    Returns the latest reliability value of the component `component`.
+    Return -1 if rvalue value not found.
+*/
+double PerformanceCounters::getRvalueOfComponent (std::string component) const {
+    ifstream rvalueLogFile(instRvalueFileName);
+    string header;
+    string footer;
+
+    if (rvalueLogFile.good()) {
+        getline(rvalueLogFile, header);
+        getline(rvalueLogFile, footer);
+    }
+
+    std::istringstream issHeader(header);
+    std::istringstream issFooter(footer);
+    std::string token;
+
+    while(getline(issHeader, token, '\t')) {
+        std::string value;
+        getline(issFooter, value, '\t');
+
+        if (token == component) {
+            return stod(value);
+        }
+    }
+
+    return -1;
+}
+
+/** getRvalueOfCore
+ * Return the latest reliability value of the given core.
+ * Requires "tp" (total power) to be tracked in base.cfg.
+ * Return -1 if power is not tracked.
+ */
+double PerformanceCounters::getRvalueOfCore (int coreId) const {
+    string component = "Core" + std::to_string(coreId) + "-TP";
+    return getRvalueOfComponent(component);
+}
+
+vector<double> PerformanceCounters::getVddOfCores (int numberOfCores) const {
+	ifstream vddLogFile(instVddFileName);
+	string header;
+	string data;
+
+	if (vddLogFile.good()) {
+		getline(vddLogFile, header);
+		getline(vddLogFile, data);
+	}
+
+	std::istringstream issData(data);
+
+	vector<double> vdds;
+	for (int i = 0; i < numberOfCores; i++) {
+		std::string value;
+		getline(issData, value, '\t');
+		vdds.push_back(stod(value));
+	}
+
+	return vdds;
+}
+
+vector<double> PerformanceCounters::getDeltaVthOfCores (int numberOfCores) const {
+	ifstream deltaVthLogFile(instDeltaVthFileName);
+	string data;
+
+	if (deltaVthLogFile.good()) {
+		getline(deltaVthLogFile, data);
+	}
+
+	std::istringstream issData(data);
+
+	vector<double> delta_vs;
+	for (int i = 0; i < numberOfCores; i++) {
+		std::string value;
+		getline(issData, value, '\t');
+		delta_vs.push_back(stod(value));
+	}
+
+	return delta_vs;
 }

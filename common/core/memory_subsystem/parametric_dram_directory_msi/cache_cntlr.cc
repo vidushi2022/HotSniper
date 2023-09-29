@@ -1090,6 +1090,7 @@ CacheCntlr::walkUsageBits()
 boost::tuple<HitWhere::where_t, SubsecondTime>
 CacheCntlr::accessDRAM(Core::mem_op_t mem_op_type, IntPtr address, bool isPrefetch, Byte* data_buf)
 {
+   printf("Shaillja inside accessDRAM");
    ScopedLock sl(getLock()); // DRAM is shared and owned by m_master
 
    SubsecondTime t_issue = getShmemPerfModel()->getElapsedTime(ShmemPerfModel::_USER_THREAD);
