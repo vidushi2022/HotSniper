@@ -1,8 +1,10 @@
 /**
  * scheduler_open
- * This class implements open scheduler functionality of SniperPlus.
+ * This class implements open scheduler functionality.
  */
 
+
+#include <cmath>
 
 #include "scheduler_open.h"
 #include "config.hpp"
@@ -10,117 +12,18 @@
 #include "core_manager.h"
 #include "performance_model.h"
 #include "magic_server.h"
-#include "thread_manager.h"
 
-#include "policies/dvfsMaxFreq.h"
-#include "policies/dvfsFixedPower.h"
-#include "policies/dvfsTSP.h"
-#include "policies/dvfsTestStaticPower.h"
+#include "policies/dvfsConstFreq.h"
+#include "policies/dvfsOndemand.h"
 #include "policies/mapFirstUnused.h"
+
+#include "policies/dramLowpower.h"
 
 #include <iomanip>
 #include <random>
-#include <vector>
-#include <queue>
-#include <iostream>
 #include <bits/stdc++.h>
 
 using namespace std;
-
-int k=0;
-
-String queuePolicy; //Stores Queuing Policy for Open System from base.cfg.
-String distribution; //Stores the arrival distribution of the open workload from base.cfg.
-
-bool randomPriority; //Stores 1 if priority to be assigned randomly or 0 if priority is to be set by user explicitly from base.cfg.
-
-int arrivalRate; //Stores the arrival rate of the workload from base.cfg.
-int arrivalInterval; //Stores the arrival interval of the workload from base.cfg.
-
-int numberOfTasks; //Stores the number of tasks in the open workload.
-int numberOfCores; //Stores the number of cores in the system.
-
-int coreRequirementTranslation (String compositionString);
-
-//This data structure maintains the state of the tasks.
-struct openTask {
-
-	openTask(int taskIDInput, String taskNameInput) : taskID(taskIDInput), taskName(taskNameInput) {}
-
-	int taskID;
-        String taskName;
-	bool waitingToSchedule = true;
-	bool waitingInQueue = false;
-	bool active = false;
-	bool completed = false;
-	int taskCoreRequirement = coreRequirementTranslation(taskName);
-	UInt64 taskArrivalTime;
-	UInt64 taskStartTime;
-	UInt64 taskDepartureTime; 
-	int priority;
-	
-};
-
-vector <openTask> openTasks;
-
-struct ComparePriority {															//custom comparator for waitingTaskQ
-			bool operator()(openTask p1, openTask p2){
-			// return "true" if "p1" is ordered
-			// before "p2", for example:
-				if(p1.priority == p2.priority){
-					return p1.taskArrivalTime > p2.taskArrivalTime;
-				}
-				else{
-					return p1.priority < p2.priority;
-				}
-			}
-		};
-
-struct ComparePriorityAQ {															//custom comparator for ActiveTaskQ
-			bool operator()(openTask p1, openTask p2){
-			// return "true" if "p1" is ordered
-			// before "p2", for example:
-				return p1.priority > p2.priority;
-			}
-		};
-
-void showAQ(priority_queue<openTask, vector<openTask>, ComparePriorityAQ> gq)		//display taskID of tasks in ActiveTaskQ
-{
-    priority_queue<openTask, vector<openTask>, ComparePriorityAQ> g = gq;
-    while (!g.empty()) {
-        cout << g.top().taskID;
-        g.pop();
-    }
-    cout << '\n';
-};
-
-void showtaskID(priority_queue<openTask, vector<openTask>, ComparePriority> gq)		//display taskID of tasks in waitingTaskQ
-{
-    priority_queue<openTask, vector<openTask>, ComparePriority> g = gq;
-    while (!g.empty()) {
-        cout << g.top().taskID;
-        g.pop();
-    }
-    cout << '\n';
-};
-
-
-priority_queue<openTask, vector<openTask>, ComparePriority> waitingTaskQ;			//This priority queue holds the tasks in waiting queue in order of priority (with highest priority at top)
-priority_queue<openTask, vector<openTask>, ComparePriorityAQ> ActiveTaskQ;		//This priority queue holds the tasks that are active in order of priority (with lowest priority at top)
-
-		
-//This data structure maintains the state of the cores.
-struct systemCore {
-
-	systemCore(int coreIDInput) : coreID(coreIDInput) {}
-
-	int coreID;
-	int assignedTaskID = -1; // -1 means core assigned to no task
-	int assignedThreadID = -1;// -1 means core assigned to no thread.
-};
-
-vector <systemCore> systemCores;
-
 
 
 /** SchedulerOpen
@@ -132,25 +35,18 @@ SchedulerOpen::SchedulerOpen(ThreadManager *thread_manager)
    , m_next_core(0) {
 
 	// Initialize config constants
-	minFrequency = (int)(1000 * Sim()->getCfg()->getFloat("scheduler/open/dvfs/min_frequency") + 0.5);
-	maxFrequency = (int)(1000 * Sim()->getCfg()->getFloat("scheduler/open/dvfs/max_frequency") + 0.5);
-	frequencyStepSize = (int)(1000 * Sim()->getCfg()->getFloat("scheduler/open/dvfs/frequency_step_size") + 0.5);
+	minFrequency = (int)(1000 * Sim()->getCfg()->getFloat("perf_model/core/min_frequency") + 0.5);
+	maxFrequency = (int)(1000 * Sim()->getCfg()->getFloat("perf_model/core/max_frequency") + 0.5);
+	frequencyStepSize = (int)(1000 * Sim()->getCfg()->getFloat("perf_model/core/frequency_step_size") + 0.5);
 	dvfsEpoch = atol(Sim()->getCfg()->getString("scheduler/open/dvfs/dvfs_epoch").c_str());
+	dramEpoch = atol(Sim()->getCfg()->getString("scheduler/open/dram/dram_epoch").c_str()); // Required for Dram policy.
+
 	migrationEpoch = atol(Sim()->getCfg()->getString("scheduler/open/migration/epoch").c_str());
 
 	m_core_mask.resize(Sim()->getConfig()->getApplicationCores());
 	for (core_id_t core_id = 0; core_id < (core_id_t)Sim()->getConfig()->getApplicationCores(); core_id++) {
 	       m_core_mask[core_id] = Sim()->getCfg()->getBoolArray("scheduler/open/core_mask", core_id);
   	}
-
-	for (core_id_t core_id = 0; core_id < (core_id_t)Sim()->getConfig()->getApplicationCores(); core_id++) {
-		downscalingPatience.push_back(maxDVFSPatience);
-		upscalingPatience.push_back(maxDVFSPatience);
-	}
-
-
-	performanceCounters = new PerformanceCounters(Sim()->getCfg()->getString("general/output_dir").c_str(),
-		"InstantaneousPower.log", "InstantaneousTemperature.log", "InstantaneousCPIStack.log");
 
 	mappingEpoch = atol (Sim()->getCfg()->getString("scheduler/open/epoch").c_str());
 	queuePolicy = Sim()->getCfg()->getString("scheduler/open/queuePolicy").c_str();
@@ -159,25 +55,31 @@ SchedulerOpen::SchedulerOpen(ThreadManager *thread_manager)
 	arrivalInterval = atoi (Sim()->getCfg()->getString("scheduler/open/arrivalInterval").c_str());
 	numberOfTasks = Sim()->getCfg()->getInt("traceinput/num_apps");
 	numberOfCores = Sim()->getConfig()->getApplicationCores();
-	randomPriority = Sim()->getCfg() ->getBool("scheduler/open/randompriority");
-	
+	numberOfBanks = Sim()->getCfg()->getInt("memory/num_banks"); // Required for Dram policy.
+	numberOfComponents = 21 * numberOfCores; // there are 21 subcore components per core according to base.cfg
+	numberOfComponents += (Sim()->getCfg()->getBool("core_power/l3")) ? numberOfCores : 0; // l3 is optional
 
-	
+	coresInX = Sim()->getCfg()->getInt("memory/cores_in_x");
+	coresInY = Sim()->getCfg()->getInt("memory/cores_in_y");
+	coresInZ = Sim()->getCfg()->getInt("memory/cores_in_z");
 
-	coreRows = (int)sqrt(numberOfCores);
-	while ((numberOfCores % coreRows) != 0) {
-		coreRows -= 1;
-	}
-	coreColumns = numberOfCores / coreRows;
-	if (coreRows * coreColumns != numberOfCores) {
-		cout<<"\n[Scheduler] [Error]: Invalid system size: " << numberOfCores << ", expected rectangular-shaped system." << endl;
-		exit (1);
-	}
-	double ambientTemperature = Sim()->getCfg()->getFloat("periodic_thermal/ambient_temperature");
-    double maxTemperature = Sim()->getCfg()->getFloat("periodic_thermal/max_temperature");
-    double inactivePower = Sim()->getCfg()->getFloat("periodic_thermal/inactive_power");
-    double tdp = Sim()->getCfg()->getFloat("periodic_thermal/tdp");
-	thermalModel = new ThermalModel((unsigned int)coreRows, (unsigned int)coreColumns, Sim()->getCfg()->getString("periodic_thermal/thermal_model"), ambientTemperature, maxTemperature, inactivePower, tdp);
+	banksInX = Sim()->getCfg()->getInt("memory/banks_in_x");
+	banksInY = Sim()->getCfg()->getInt("memory/banks_in_y");
+	banksInZ = Sim()->getCfg()->getInt("memory/banks_in_z");
+
+	performanceCounters = new PerformanceCounters(
+		Sim()->getCfg()->getString("hotspot/log_files/combined_instpower_trace_file").c_str(),
+		Sim()->getCfg()->getString("hotspot/log_files/combined_insttemperature_trace_file").c_str(),
+		"InstantaneousCPIStack.log",
+		Sim()->getCfg()->getString("reliability/log_files/instant_trace_file").c_str(),
+		"InstantVdd.log",
+		Sim()->getCfg()->getString("reliability/log_files/delta_v_file").c_str());
+
+	rlb_enabled = Sim()->getCfg()->getBool("reliability/enabled");
+	subcore_enabled = !(Sim()->getCfg()->getBool("core_power/tp"));
+	vth = (float) Sim()->getCfg()->getFloat("power/vth");
+	delta_v_scale_factor = (float) Sim()->getCfg()->getFloat("reliability/delta_v_scale_factor");
+	maxFrequencyDynamic = std::vector<int> (numberOfCores, maxFrequency);
 
 	//Initialize the cores in the system.
 	for (int coreIterator=0; coreIterator < numberOfCores; coreIterator++) {
@@ -188,29 +90,9 @@ SchedulerOpen::SchedulerOpen(ThreadManager *thread_manager)
 	String benchmarks = Sim()->getCfg()->getString("traceinput/benchmarks");
 	String benchmarksDelimiter = "+";
 	for (int taskIterator = 0; taskIterator < numberOfTasks; taskIterator++) {
-		openTasks.push_back (openTask (taskIterator,benchmarks.substr(0, benchmarks.find(benchmarksDelimiter))));
-		benchmarks.erase(0, benchmarks.find(benchmarksDelimiter) + benchmarksDelimiter.length());		
-	}						
-
-	//Initialize the priority values (only when queuePolicy is "priority")
-	if(queuePolicy == "priority"){
-
-		if(randomPriority == true){
-			for (int taskIterator = 0; taskIterator < numberOfTasks; taskIterator++) {
-				openTasks[taskIterator].priority = rand()%10;
-				
-				cout << "[Scheduler]: Setting Priority for Task " << taskIterator << " (" + openTasks[taskIterator].taskName + ")" << " to " << openTasks[taskIterator].priority << endl;
-			}
-		}
-		else{
-			for (int taskIterator = 0; taskIterator < numberOfTasks; taskIterator++) {
-			UInt64 priorityvalue = Sim()->getCfg()->getIntArray("scheduler/open/explicitPriorityValues", taskIterator);
-			cout << "[Scheduler]: Setting Priority for Task " << taskIterator << " (" + openTasks[taskIterator].taskName + ")" << " to " << priorityvalue << endl;
-			openTasks[taskIterator].priority = priorityvalue;
-			
-			}
-		}
-
+		String taskName = benchmarks.substr(0, benchmarks.find(benchmarksDelimiter));
+		openTasks.push_back (openTask (taskIterator, taskName, coreRequirementTranslation(taskName)));
+		benchmarks.erase(0, benchmarks.find(benchmarksDelimiter) + benchmarksDelimiter.length());
 	}
 
 	//Initialize the task arrival time based on queuing policy.
@@ -220,14 +102,12 @@ SchedulerOpen::SchedulerOpen(ThreadManager *thread_manager)
 			if (taskIterator % arrivalRate == 0 && taskIterator != 0) time += arrivalInterval;  
 			cout << "[Scheduler]: Setting Arrival Time for Task " << taskIterator << " (" + openTasks[taskIterator].taskName + ")" << " to " << time << +" ns" << endl;
 			openTasks[taskIterator].taskArrivalTime = time;
-							
 		}
 	} else if (distribution == "explicit") {
 		for (int taskIterator = 0; taskIterator < numberOfTasks; taskIterator++) {
 			UInt64 time = Sim()->getCfg()->getIntArray("scheduler/open/explicitArrivalTimes", taskIterator);
 			cout << "[Scheduler]: Setting Arrival Time for Task " << taskIterator << " (" + openTasks[taskIterator].taskName + ")" << " to " << time << +" ns" << endl;
 			openTasks[taskIterator].taskArrivalTime = time;
-			
 		}
 	} else if (distribution == "poisson") {
 		// calculate Poisson-distributed arrival rates for the task.
@@ -251,23 +131,16 @@ SchedulerOpen::SchedulerOpen(ThreadManager *thread_manager)
 			}
 			cout << "[Scheduler]: Setting Arrival Time for Task " << taskIterator << " (" + openTasks[taskIterator].taskName + ")" << " to " << time << +" ns" << endl;
 			openTasks[taskIterator].taskArrivalTime = time;
-				
 		}
-
-		
 	} else {
 		cout << "\n[Scheduler] [Error]: Unknown Workload Arrival Distribution: '" << distribution << "'" << endl;
  		exit (1);
 	}
 
-	for(int taskIterator = 0; taskIterator < numberOfTasks; taskIterator++){
-		waitingTaskQ.push(openTasks[taskIterator]);
-		cout << "Pushing Task " << taskIterator << " to the waitingTaskQ" << endl;
-	}
-	
 	initMappingPolicy(Sim()->getCfg()->getString("scheduler/open/logic").c_str());
 	initDVFSPolicy(Sim()->getCfg()->getString("scheduler/open/dvfs/logic").c_str());
 	initMigrationPolicy(Sim()->getCfg()->getString("scheduler/open/migration/logic").c_str());
+	initDramPolicy(Sim()->getCfg()->getString("scheduler/open/dram/dtm").c_str());
 }
 
 /** initMappingPolicy
@@ -285,7 +158,7 @@ void SchedulerOpen::initMappingPolicy(String policyName) {
 				break;
 			}
 		}
-		mappingPolicy = new MapFirstUnused(coreRows, coreColumns, preferredCoresOrder);
+		mappingPolicy = new MapFirstUnused(numberOfCores, preferredCoresOrder);
 	} //else if (policyName ="XYZ") {... } //Place to instantiate a new mapping logic. Implementation is put in "policies" package.
 	else {
 		cout << "\n[Scheduler] [Error]: Unknown Mapping Algorithm" << endl;
@@ -300,15 +173,26 @@ void SchedulerOpen::initDVFSPolicy(String policyName) {
 	cout << "[Scheduler] [Info]: Initializing DVFS policy" << endl;
 	if (policyName == "off") {
 		dvfsPolicy = NULL;
-	} else if (policyName == "maxFreq") {
-		dvfsPolicy = new DVFSMaxFreq(performanceCounters, coreRows, coreColumns, maxFrequency);
-	} else if (policyName == "testStaticPower") {
-		dvfsPolicy = new DVFSTestStaticPower(performanceCounters, coreRows, coreColumns, minFrequency, maxFrequency);
-	} else if (policyName == "fixedPower") {
-		float perCorePowerBudget = Sim()->getCfg()->getFloat("scheduler/open/dvfs/fixed_power/per_core_power_budget");
-		dvfsPolicy = new DVFSFixedPower(performanceCounters, coreRows, coreColumns, minFrequency, maxFrequency, frequencyStepSize, perCorePowerBudget);
-	} else if (policyName == "tsp") {
-		dvfsPolicy = new DVFSTSP(thermalModel, performanceCounters, coreRows, coreColumns, minFrequency, maxFrequency, frequencyStepSize);
+	} else if (policyName == "constFreq") {
+		int activeCoreFreq = (int)(1000 * Sim()->getCfg()->getFloat("scheduler/open/dvfs/constFreq/active_core_freq") + 0.5);
+		int idleCoreFreq = (int)(1000 * Sim()->getCfg()->getFloat("scheduler/open/dvfs/constFreq/idle_core_freq") + 0.5);
+		dvfsPolicy = new DVFSConstFreq(performanceCounters, numberOfCores, activeCoreFreq, idleCoreFreq);
+	} else if (policyName == "ondemand") {
+		float upThreshold = Sim()->getCfg()->getFloat("scheduler/open/dvfs/ondemand/up_threshold");
+		float downThreshold = Sim()->getCfg()->getFloat("scheduler/open/dvfs/ondemand/down_threshold");
+		float dtmCriticalTemperature = Sim()->getCfg()->getFloat("scheduler/open/dvfs/ondemand/dtm_cricital_temperature");
+		float dtmRecoveredTemperature = Sim()->getCfg()->getFloat("scheduler/open/dvfs/ondemand/dtm_recovered_temperature");
+		dvfsPolicy = new DVFSOndemand(
+			performanceCounters,
+			numberOfCores,
+			minFrequency,
+			maxFrequency,
+			frequencyStepSize,
+			upThreshold,
+			downThreshold,
+			dtmCriticalTemperature,
+			dtmRecoveredTemperature
+		);
 	} //else if (policyName ="XYZ") {... } //Place to instantiate a new DVFS logic. Implementation is put in "policies" package.
 	else {
 		cout << "\n[Scheduler] [Error]: Unknown DVFS Algorithm" << endl;
@@ -317,7 +201,7 @@ void SchedulerOpen::initDVFSPolicy(String policyName) {
 }
 
 /** initMigrationPolicy
- * Initialize the migration policy to the policy with the given name
+ * Initialize the DVFS policy to the policy with the given name
  */
 void SchedulerOpen::initMigrationPolicy(String policyName) {
 	cout << "[Scheduler] [Info]: Initializing migration policy" << endl;
@@ -325,7 +209,7 @@ void SchedulerOpen::initMigrationPolicy(String policyName) {
 		migrationPolicy = NULL;
 	} //else if (policyName ="XYZ") {... } //Place to instantiate a new migration logic. Implementation is put in "policies" package.
 	else {
-		cout << "\n[Scheduler] [Error]: Unknown Migration Algorithm" << endl;
+		cout << "\n[Scheduler] [Error]: Unknown Migration Algorithm: " << policyName << endl;
  		exit (1);
 	}
 }
@@ -333,7 +217,7 @@ void SchedulerOpen::initMigrationPolicy(String policyName) {
 /** taskFrontOfQueue
     Returns the ID of the task in front of queue. Place to implement a new queuing policy.
 */
-int taskFrontOfQueue () {
+int SchedulerOpen::taskFrontOfQueue () {
 	int IDofTaskInFrontOfQueue = -1;
 
 	if (queuePolicy == "FIFO") {
@@ -345,24 +229,6 @@ int taskFrontOfQueue () {
 		}
 	}
 	//else if (queuePolicy ="XYZ") {... } //Place to implement a new queuing policy.
-	else if (queuePolicy == "priority"){ 
-		SubsecondTime time = Sim()->getClockSkewMinimizationServer()->getGlobalTime();
-		if ((openTasks [waitingTaskQ.top().taskID].waitingInQueue) && (openTasks[waitingTaskQ.top().taskID].taskArrivalTime <= time.getNS())){
-
-			IDofTaskInFrontOfQueue = waitingTaskQ.top().taskID;
-
-		}
-
-		else {
-			while ((!openTasks [waitingTaskQ.top().taskID].waitingInQueue) || (!(openTasks[waitingTaskQ.top().taskID].taskArrivalTime <= time.getNS()))){
-
-				waitingTaskQ.pop();
-
-			}
-			IDofTaskInFrontOfQueue = waitingTaskQ.top().taskID;
-		}
-		
-	}
 	else {
 	
 		cout<<"\n[Scheduler] [Error]: Unknown Queuing Policy"<< endl;
@@ -372,10 +238,12 @@ int taskFrontOfQueue () {
 	return IDofTaskInFrontOfQueue;
 }
 
+
+
 /** numberOfFreeCores
     Returns number of free cores in the system.
 */
-int numberOfFreeCores () {
+int SchedulerOpen::numberOfFreeCores () {
 	int freeCoresCounter = 0;
 	for (int coreCounter = 0; coreCounter < numberOfCores; coreCounter++) {
 		if (systemCores[coreCounter].assignedTaskID == -1) {
@@ -388,7 +256,7 @@ int numberOfFreeCores () {
 /** numberOfTasksInQueue
     Returns the number of tasks in the queue.
 */
-int numberOfTasksInQueue () {
+int SchedulerOpen::numberOfTasksInQueue () {
 	int tasksInQueue = 0;
 	
 	for (int taskCounter = 0; taskCounter < numberOfTasks; taskCounter++) 
@@ -401,7 +269,7 @@ int numberOfTasksInQueue () {
 /** numberOfTasksWaitingToSchedule
     Returns the number of tasks not yet entered into the queue.
 */
-int numberOfTasksWaitingToSchedule () {
+int SchedulerOpen::numberOfTasksWaitingToSchedule () {
 	int tasksWaitingToSchedule = 0;
 	
 	for (int taskCounter = 0; taskCounter < numberOfTasks; taskCounter++) 
@@ -415,7 +283,7 @@ int numberOfTasksWaitingToSchedule () {
 /** numberOfTasksCompleted
     Returns the number of tasks completed.
 */
-int numberOfTasksCompleted () {
+int SchedulerOpen::numberOfTasksCompleted () {
 	int tasksCompleted = 0;
 	
 	for (int taskCounter = 0; taskCounter < numberOfTasks; taskCounter++) 
@@ -429,7 +297,7 @@ int numberOfTasksCompleted () {
 /** numberOfActiveTasks
     Returns the number of active tasks.
 */
-int numberOfActiveTasks () {
+int SchedulerOpen::numberOfActiveTasks () {
 	int activeTasks = 0;
 	
 	for (int taskCounter = 0; taskCounter < numberOfTasks; taskCounter++) 
@@ -443,7 +311,7 @@ int numberOfActiveTasks () {
 /** numberOfActiveTasks
     Returns the number of core required by all active tasks.
 */
-int totalCoreRequirementsOfActiveTasks () {
+int SchedulerOpen::totalCoreRequirementsOfActiveTasks () {
 	int coreRequirement = 0;
 	
 	for (int taskCounter = 0; taskCounter < numberOfTasks; taskCounter++) 
@@ -460,6 +328,7 @@ bool SchedulerOpen::threadSetAffinity(thread_id_t calling_thread_id, thread_id_t
 {
    if (m_thread_info.size() <= (size_t)thread_id)
       m_thread_info.resize(thread_id + 16);
+
    m_thread_info[thread_id].setExplicitAffinity();
 
    if (!mask)
@@ -591,12 +460,12 @@ void SchedulerOpen::migrateThread(thread_id_t thread_id, core_id_t core_id)
 /** getCoreNb
  * Return the number of the core at the given coordinates.
  */
-int SchedulerOpen::getCoreNb(int y, int x) {
-	if ((y < 0) || (y >= coreRows) || (x < 0) || (x >= coreColumns)) {
-		cout << "[Scheduler][getCoreNb][Error]: Invalid core coordinates: " << y << ", " << x << endl;
+int SchedulerOpen::getCoreNb(int x, int y, int z) {
+	if ((x < 0) || (x >= coresInX) || (y < 0) || (y >= coresInY) || (z < 0) || (z >= coresInX)) {
+		cout << "[Scheduler][getCoreNb][Error]: Invalid core coordinates: " << x << ", " << y << ", " << z << endl;
 		exit (1);
 	}
-	return y * coreColumns + x;
+	return (z * coresInY + y) * coresInX + x;
 }
 
 /** isAssignedToTask
@@ -647,25 +516,10 @@ bool SchedulerOpen::schedule (int taskID, bool isInitialCall, SubsecondTime time
 	if (openTasks [taskID].taskArrivalTime > time.getNS ()) {
 		cout <<"\n[Scheduler]: Task " << taskID << " is not ready for execution. \n";	
 		return false; //Task not ready for mapping.
-	} 
-	
-	else {
+	} else {
 		cout <<"\n[Scheduler]: Task " << taskID << " put into execution queue. \n";
 		openTasks [taskID].waitingInQueue = true;
 		openTasks [taskID].waitingToSchedule = false;
-			
-		if(waitingTaskQ.size()>1){
-			openTask tempo = waitingTaskQ.top();
-			waitingTaskQ.pop();
-			
-			if(tempo.taskID != waitingTaskQ.top().taskID){		//making sure that one task doesn't get pushed to waitingTaskQ twice
-				waitingTaskQ.push(tempo);
-			}
-			else{
-				waitingTaskQ.pop();
-				waitingTaskQ.push(openTasks[tempo.taskID]);
-			}
-		}	
 	}
 
 	if (taskFrontOfQueue () != taskID) {
@@ -674,77 +528,27 @@ bool SchedulerOpen::schedule (int taskID, bool isInitialCall, SubsecondTime time
 		return false; //Not turn of this task to be mapped.
 	}
 
-	if (numberOfFreeCores () < openTasks[taskID].taskCoreRequirement) { //If priority queuing is adopted, then we need to check for it and readjust tasks if required
- 		if((queuePolicy == "priority") && (openTasks [ActiveTaskQ.top().taskID].priority < openTasks[taskID].priority)){
-		   	 while((numberOfFreeCores () < openTasks[taskID].taskCoreRequirement) && (openTasks[ActiveTaskQ.top().taskID].priority < openTasks[taskID].priority) ){
-				for(int t=0; t < Sim()->getThreadManager()->getNumThreads() ; t++ ){
-					app_id_t app_id =  Sim()->getThreadManager()->getThreadFromID(t)->getAppId();
-					if(ActiveTaskQ.top().taskID == app_id ){
-						 SubsecondTime time = Sim()->getClockSkewMinimizationServer()->getGlobalTime();
-						
-						for (int i = 0; i < numberOfCores; i++) {
-							if (systemCores[i].assignedThreadID == t){
-								systemCores[i].assignedThreadID = -1;
-								cout << "\n[Scheduler]: Releasing Core " << i << " from Thread " << t << "\n";
-								
-								cpu_set_t my_set; 
-								CPU_ZERO(&my_set); 
-								CPU_SET(INVALID_CORE_ID, &my_set);
-								Sim()->getThreadManager()->getLock();
-								m_thread_info[t].clearAffinity();	
-							}
+	if (numberOfFreeCores () < openTasks[taskID].taskCoreRequirement) {
 
-						}
-					
-						if (t < numberOfTasks) {									
-							
+		cout <<"\n[Scheduler]: Not Enough Free Cores (" << numberOfFreeCores () << ") to Schedule the Task " << taskID << " with cores requirement " << openTasks[taskID].taskCoreRequirement  << endl;
+		return false;
 
-							for (int i = 0; i < numberOfCores; i++) {
-								if (systemCores[i].assignedTaskID == app_id) {
-									systemCores[i].assignedTaskID = -1;
-								}
-							}
-						}				 	
-					}
-				}
-				 	
-				openTasks[ActiveTaskQ.top().taskID].active = false;
-				openTasks[ActiveTaskQ.top().taskID].waitingInQueue = true;
-				if(waitingTaskQ.top().taskID != ActiveTaskQ.top().taskID){
-					waitingTaskQ.push(ActiveTaskQ.top());
-				}
-				ActiveTaskQ.pop();
-				k++;
-			}																								
-	 	}
-		 
-		else{						
-			cout <<"\n[Scheduler]: Not Enough Free Cores (" << numberOfFreeCores () << ") to Schedule the Task " << taskID << " with cores requirement " << openTasks[taskID].taskCoreRequirement  << endl;
-			return false;
-		}
 	}
 
 	mappingSuccesfull = executeMappingPolicy(taskID, time);
-		if (mappingSuccesfull) {
-			if (!isInitialCall) 
+
+	if (mappingSuccesfull) {
+		if (!isInitialCall) 
 			cout << "\n[Scheduler]: Waking Task " << taskID << " at core " << setAffinity (taskID) << endl;
-				
 		openTasks [taskID].taskStartTime = time.getNS();
-		
-		openTasks [taskID].active = true;		
-		ActiveTaskQ.push(openTasks[taskID]);
+		openTasks [taskID].active = true;
 		openTasks [taskID].waitingInQueue = false;
-		
-		if((queuePolicy=="priority") && (waitingTaskQ.top().taskID == taskID)){
-			waitingTaskQ.pop();
-		}
-			
 		openTasks [taskID].waitingToSchedule = false;
 	} 
 
 	return mappingSuccesfull;
-
 }
+
 
 /** threadCreate
     This original Sniper function is called when a thread is created.
@@ -758,15 +562,13 @@ core_id_t SchedulerOpen::threadCreate(thread_id_t thread_id) {
 
 	//thead_id 0 to numberOfTasks are first threads of tasks, which are all created together when the system starts.
 	if (thread_id == 0) 
-	{	
-		
+	{
 		if (!schedule (0, true, time)) 
-		{	
+		{
 			cout << "\n[Scheduler] [Error]: Task 0 must be mapped for simulation to work.\n";
 			exit (1);
 		} 
 
-		
 	} else if (thread_id > 0 && thread_id <  numberOfTasks) 
 	{
 
@@ -811,39 +613,12 @@ core_id_t SchedulerOpen::threadCreate(thread_id_t thread_id) {
 /** fetchTasksIntoQueue
     This function pulls tasks into the openSystem Queue.
 */
-void fetchTasksIntoQueue (SubsecondTime time) {
-
-	if(queuePolicy == "priority"){
-		for (int taskCounter = 0; taskCounter < numberOfTasks; taskCounter++) {
-			if (openTasks [taskCounter].waitingToSchedule && openTasks [taskCounter].taskArrivalTime <= time.getNS ()) {
-				
-				cout <<"\n[Scheduler]: Task " << taskCounter << " put into execution queue. \n";
-				openTasks [taskCounter].waitingInQueue = true;
-				
-				
-					if(waitingTaskQ.top().taskID != taskCounter){
-					waitingTaskQ.push(openTasks [taskCounter]);
-					}
-					
-					if(waitingTaskQ.top().taskID == ActiveTaskQ.top().taskID){
-						waitingTaskQ.pop();
-					}
-			
-			
-				openTasks [taskCounter].waitingToSchedule = false;
-
-				cout << "Task " << taskCounter << " has been pushed to waitingTaskQ" << endl;
-			}
-		}
-	}
-
-	else{
-		for (int taskCounter = 0; taskCounter < numberOfTasks; taskCounter++) {
-			if (openTasks [taskCounter].waitingToSchedule && openTasks [taskCounter].taskArrivalTime <= time.getNS ()) {
-				cout <<"\n[Scheduler]: Task " << taskCounter << " put into execution queue. \n";
-				openTasks [taskCounter].waitingInQueue = true;
-				openTasks [taskCounter].waitingToSchedule = false;
-			}
+void SchedulerOpen::fetchTasksIntoQueue (SubsecondTime time) {
+	for (int taskCounter = 0; taskCounter < numberOfTasks; taskCounter++) {
+		if (openTasks [taskCounter].waitingToSchedule && openTasks [taskCounter].taskArrivalTime <= time.getNS ()) {
+			cout <<"\n[Scheduler]: Task " << taskCounter << " put into execution queue. \n";
+			openTasks [taskCounter].waitingInQueue = true;
+			openTasks [taskCounter].waitingToSchedule = false;
 		}
 	}
 }
@@ -873,50 +648,23 @@ void SchedulerOpen::threadExit(thread_id_t thread_id, SubsecondTime time) {
 		
 	}
 
-
 	if (thread_id < numberOfTasks) {
-		
 		cout << "\n[Scheduler]: Task " << app_id << " Finished." << "\n";
 
-			for (int i = 0; i < numberOfCores; i++) {
-				if (systemCores[i].assignedTaskID == app_id) {
-					systemCores[i].assignedTaskID = -1;
-					cout << "\n[Scheduler]: Releasing Core " << i << " from Task " << app_id << "\n";
-				}
+		for (int i = 0; i < numberOfCores; i++) {
+			if (systemCores[i].assignedTaskID == app_id) {
+				systemCores[i].assignedTaskID = -1;
+				cout << "\n[Scheduler]: Releasing Core " << i << " from Task " << app_id << "\n";
 			}
+		}
 
-			openTasks[app_id].taskDepartureTime = time.getNS();
-			openTasks[app_id].completed = true;
-			openTasks[app_id].active = false;
-			if(queuePolicy == "priority"){
-				priority_queue<openTask, vector<openTask>, ComparePriority> tempQ;
+		openTasks[app_id].taskDepartureTime = time.getNS();
+		openTasks[app_id].completed = true;
+		openTasks[app_id].active = false;
 
-				if(ActiveTaskQ.top().taskID == app_id){
-
-					ActiveTaskQ.pop();
-
-				}
-				else{
-					while(ActiveTaskQ.top().taskID != app_id){
-
-						tempQ.push(ActiveTaskQ.top());
-						ActiveTaskQ.pop();
-
-					}
-
-					while(tempQ.size() != 0){
-
-						ActiveTaskQ.push(tempQ.top());
-						tempQ.pop();
-
-					}
-				}
-			}
-			
 		cout << "\n[Scheduler][Result]: Task " << app_id << " (Response/Service/Wait) Time (ns) "  << " :\t" <<  time.getNS() - openTasks[app_id].taskArrivalTime << "\t" <<  time.getNS() - openTasks[app_id].taskStartTime << "\t" << openTasks[app_id].taskStartTime - openTasks[app_id].taskArrivalTime << "\n";
-	
 	}
-	
+
 	if (numberOfFreeCores () == numberOfCores && numberOfTasksWaitingToSchedule () != 0) {
 		cout << "\n[Scheduler]: System Going Empty ... Prefetching Tasks\n"; //Without Prefectching Sniper will Deadlock or End Prematurely.
 
@@ -939,6 +687,11 @@ void SchedulerOpen::threadExit(thread_id_t thread_id, SubsecondTime time) {
 					}
 				}
 
+			}
+
+			if (nextArrivalTime == 0) {
+				cout << "\n[Scheduler]: INTERNAL ERROR: nextArrivalTime == 0";
+				exit(1);
 			}
 
 			timeJump = nextArrivalTime - time.getNS();
@@ -1026,7 +779,7 @@ void SchedulerOpen::threadSetInitialAffinity(thread_id_t thread_id)
 /** coreRequirementTranslation
     This function gets the worst-case core requirement of a task.
 */
-int coreRequirementTranslation (String compositionString) {
+int SchedulerOpen::coreRequirementTranslation (String compositionString) {
 	int del1 = compositionString.find('-');
 	int del2 = compositionString.find('-', del1 + 1);
 	int del3 = compositionString.find('-', del2 + 1);
@@ -1124,62 +877,64 @@ int coreRequirementTranslation (String compositionString) {
 	}
 }
 
-
-/**
- * Return whether the DVFS control loop should be patient and delay the DVFS scaling.
- */
-bool SchedulerOpen::delayDVFSTransition(int coreCounter, int oldFrequency, int newFrequency) {
-	return ((newFrequency == oldFrequency - frequencyStepSize) && (downscalingPatience.at(coreCounter) > 0))
-		 || ((newFrequency == oldFrequency + frequencyStepSize) && (upscalingPatience.at(coreCounter) > 0));
-}
-
-/**
- * Notify that a DVFS transition was delayed
- */
-void SchedulerOpen::DVFSTransitionDelayed(int coreCounter, int oldFrequency, int newFrequency) {
-	if (newFrequency == oldFrequency - frequencyStepSize) {
-		cout << "DVFS transition delayed (current patience: " << downscalingPatience.at(coreCounter) << ")" << endl;
-		downscalingPatience.at(coreCounter) -= 1;
-	} else if (newFrequency == oldFrequency + frequencyStepSize) {
-		cout << "DVFS transition delayed (current patience: " << upscalingPatience.at(coreCounter) << ")" << endl;
-		upscalingPatience.at(coreCounter) -= 1;
-	}
-}
-
-/**
- * Notify that a DVFS transition was not delayed
- */
-void SchedulerOpen::DVFSTransitionNotDelayed(int coreCounter) {
-	downscalingPatience.at(coreCounter) = maxDVFSPatience;
-	upscalingPatience.at(coreCounter) = maxDVFSPatience;
-}
-
 /**
  * Set the frequency for a core.
  */
 void SchedulerOpen::setFrequency(int coreCounter, int frequency) {
 	int oldFrequency = Sim()->getMagicServer()->getFrequency(coreCounter);
 
-	if (frequency > oldFrequency + 1000) {
-		frequency = oldFrequency + 1000;
-	}
 	if (frequency < minFrequency) {
+		cout << "[Scheduler] [Warning]: requested frequency " << frequency << " increased to minimum frequency " << minFrequency << endl;	
 		frequency = minFrequency;
 	}
-	if (frequency > maxFrequency) {
-		frequency = maxFrequency;
+	if (frequency > maxFrequencyDynamic.at(coreCounter)) {
+		cout << "[Scheduler] [Warning]: requested frequency " << frequency << " lowered to maximum frequency " << maxFrequencyDynamic.at(coreCounter) << endl;	
+		frequency = maxFrequencyDynamic.at(coreCounter);
 	}
 
-	if (delayDVFSTransition(coreCounter, oldFrequency, frequency)) {
-		DVFSTransitionDelayed(coreCounter, oldFrequency, frequency);
-	} else {
-		DVFSTransitionNotDelayed(coreCounter);
-		if (frequency != oldFrequency) {
-			Sim()->getMagicServer()->setFrequency(coreCounter, frequency);
-		}
+	if (frequency != oldFrequency) {
+		Sim()->getMagicServer()->setFrequency(coreCounter, frequency);
 	}
 }
 
+/** checkFrequencies
+ * Calculate maximum frequency based on change in threshold voltage and adjust core frequencies if needed.
+ */
+void SchedulerOpen::checkFrequencies() {
+	std::vector<double> vdds = performanceCounters->getVddOfCores(numberOfCores);
+	std::vector<double> delta_vs;
+	if (subcore_enabled) {
+		delta_vs = performanceCounters->getDeltaVthOfCores(numberOfComponents);
+	} else {
+		delta_vs = performanceCounters->getDeltaVthOfCores(numberOfCores);
+	}
+
+	double vdd;
+	double delta_v;
+	if (subcore_enabled) {
+		// TODO:
+		// This calculates the aggregate of all subcore components.
+		// It would be better to calculate a value per core.
+		vdd = *max_element(vdds.begin(), vdds.end());
+		delta_v = *max_element(delta_vs.begin(), delta_vs.end());
+	}
+
+	for (int coreCounter = 0; coreCounter < numberOfCores; coreCounter++) {
+		if (!subcore_enabled) {
+			vdd = vdds.at(coreCounter);
+			delta_v = delta_vs.at(coreCounter);
+		}
+		int frequency = Sim()->getMagicServer()->getFrequency(coreCounter);
+		int newMaxFrequency = maxFrequency * (1 - (delta_v * delta_v_scale_factor)/(vdd-vth));
+		maxFrequencyDynamic.at(coreCounter) = newMaxFrequency;
+
+		if (frequency > newMaxFrequency) {
+			setFrequency(coreCounter, frequency);
+		}
+
+		cout << "[Scheduler]: maxFrequency for core " << coreCounter << " is " << newMaxFrequency << endl;
+	}
+}
 
 /** executeDVFSPolicy
  * Set DVFS levels according to the used policy.
@@ -1189,14 +944,57 @@ void SchedulerOpen::executeDVFSPolicy() {
 	std::vector<bool> activeCores;
 	for (int coreCounter = 0; coreCounter < numberOfCores; coreCounter++) {
 		oldFrequencies.push_back(Sim()->getMagicServer()->getFrequency(coreCounter));
-	    static bool reserved_cores_are_active = Sim()->getCfg()->getBool("scheduler/open/dvfs/reserved_cores_are_active");
-		activeCores.push_back(reserved_cores_are_active ? isAssignedToTask(coreCounter) : isAssignedToThread(coreCounter));
+		activeCores.push_back(isAssignedToThread(coreCounter));
 	}
 	vector<int> frequencies = dvfsPolicy->getFrequencies(oldFrequencies, activeCores);
 	for (int coreCounter = 0; coreCounter < numberOfCores; coreCounter++) {
 		setFrequency(coreCounter, frequencies.at(coreCounter));
 	}
 	performanceCounters->notifyFreqsOfCores(frequencies);
+}
+
+/** initDramPolicy
+ * Initialize the Dram policy to the policy with the given name
+ */
+void SchedulerOpen::initDramPolicy(String policyName) {
+	if (policyName == "off") {
+		dramPolicy = NULL;
+	} else if (policyName == "lowpower") {
+
+		float dtmCriticalTemperature = Sim()->getCfg()->getFloat("scheduler/open/dram/dtm/dtm_critical_temperature");
+		float dtmRecoveredTemperature = Sim()->getCfg()->getFloat("scheduler/open/dram/dtm/dtm_recovered_temperature");
+		dramPolicy = new DramLowpower(
+			performanceCounters,
+			numberOfBanks,
+			dtmCriticalTemperature,
+			dtmRecoveredTemperature
+		);
+	} //else if (policyName ="XYZ") {... } // Place to instantiate a new memory DTM logic. Implementation is put in "policies" package.
+	else {
+		cout << "\n[Scheduler] [Error]: Unknown Dram Algorithm" << endl;
+ 		exit (1);
+	}
+}
+
+void SchedulerOpen::executeDramPolicy()
+{
+	std::map<int,int> old_bank_modes;
+    for (int i = 0; i < numberOfBanks; i++)
+	{
+		old_bank_modes[i] = Sim()->m_bank_modes[i];
+	}
+
+	std::map<int,int> new_bank_modes = dramPolicy->getNewBankModes(old_bank_modes);
+
+    for (int i = 0; i < numberOfBanks; i++)
+	{
+		setMemBankMode(i, new_bank_modes[i]);
+	}
+}
+
+void SchedulerOpen::setMemBankMode(int bankNr, int mode)
+{
+	Sim()->m_bank_modes[bankNr] = mode;
 }
 
 /** executeMigrationPolicy
@@ -1209,20 +1007,20 @@ void SchedulerOpen::executeMigrationPolicy(SubsecondTime time) {
 	}
 	std::vector<bool> activeCores;
 	for (int coreCounter = 0; coreCounter < numberOfCores; coreCounter++) {
-	    static bool reserved_cores_are_active = Sim()->getCfg()->getBool("scheduler/open/dvfs/reserved_cores_are_active");
+		static bool reserved_cores_are_active = Sim()->getCfg()->getBool("scheduler/open/dvfs/reserved_cores_are_active");
 		activeCores.push_back(reserved_cores_are_active ? isAssignedToTask(coreCounter) : isAssignedToThread(coreCounter));
 	}
 	std::vector<migration> migrations = migrationPolicy->migrate(time, taskIds, activeCores);
 
 	for (migration &migration : migrations) {
 		if (systemCores.at(migration.fromCore).assignedTaskID == -1) {
-			cout << "\n[Scheduler][Error]: Migration Policy ordered migration from unused core.\n";		
+			cout << "\n[Scheduler][Error]: Migration Policy ordered migration from unused core.\n";
 			exit (1);
 		}
 
 		if (migration.swap) {
 			if (systemCores.at(migration.toCore).assignedTaskID == -1) {
-				cout << "\n[Scheduler][Error]: Migration Policy ordered swap with unused core.\n";		
+				cout << "\n[Scheduler][Error]: Migration Policy ordered swap with unused core.\n";
 				exit (1);
 			}
 			int taskFrom = systemCores.at(migration.fromCore).assignedTaskID;
@@ -1235,7 +1033,7 @@ void SchedulerOpen::executeMigrationPolicy(SubsecondTime time) {
 				cpu_set_t my_set;
 				CPU_ZERO(&my_set);
 				CPU_SET(migration.toCore, &my_set);
-				threadSetAffinity(INVALID_THREAD_ID, threadFrom, sizeof(cpu_set_t), &my_set); 
+				threadSetAffinity(INVALID_THREAD_ID, threadFrom, sizeof(cpu_set_t), &my_set);
 			}
 			if (threadTo != -1) {
 				cout << "[Scheduler] moving thread " << threadTo << " from core " << migration.toCore << " to core " << migration.fromCore << endl;
@@ -1272,8 +1070,6 @@ void SchedulerOpen::periodic(SubsecondTime time) {
 	if (time.getNS () % 1000000 == 0) { //Error Checking at every 1ms. Can be faster but will have overhead in simulation time.
 		cout << "\n[Scheduler]: Time " << formatTime(time) << " [Active Tasks =  " << numberOfActiveTasks () << " | Completed Tasks = " <<  numberOfTasksCompleted () << " | Queued Tasks = "  << numberOfTasksInQueue () << " | Non-Queued Tasks  = " <<  numberOfTasksWaitingToSchedule () <<  " | Free Cores = " << numberOfFreeCores () << " | Active Tasks Requirements = " << totalCoreRequirementsOfActiveTasks () << " ] \n" << endl;
 
-		// showtaskID(waitingTaskQ);
-		// showAQ(ActiveTaskQ);
 		//Following error checking code makes sure that the system state is not messed up.
 
 		if (numberOfCores - totalCoreRequirementsOfActiveTasks () != numberOfFreeCores ()) {
@@ -1284,6 +1080,10 @@ void SchedulerOpen::periodic(SubsecondTime time) {
 		if (numberOfActiveTasks () + numberOfTasksCompleted () + numberOfTasksInQueue () + numberOfTasksWaitingToSchedule () != numberOfTasks) {
 			cout <<"\n[Scheduler] [Error]: Task State Does Not Match.\n";		
 			exit (1);
+		}
+
+		if (rlb_enabled) {
+			checkFrequencies();
 		}
 	}
 
@@ -1297,11 +1097,12 @@ void SchedulerOpen::periodic(SubsecondTime time) {
 		cout << "\n[Scheduler]: DVFS Control Loop invoked at " << formatTime(time) << endl;
 
 		executeDVFSPolicy();
+	}
 
-		std::vector<int> frequencies;
-		for (int coreCounter = 0; coreCounter < numberOfCores; coreCounter++) {
-			frequencies.push_back(Sim()->getMagicServer()->getFrequency(coreCounter));
-		}
+	if ((dramPolicy != NULL) && (time.getNS() % dramEpoch == 0)) {
+		cout << "\n[Scheduler]: Dram Control Loop invoked at " << formatTime(time) << endl;
+
+		executeDramPolicy();
 	}
 
 	if (time.getNS () % mappingEpoch == 0) {
@@ -1318,39 +1119,44 @@ void SchedulerOpen::periodic(SubsecondTime time) {
 
 		cout << "[Scheduler]: Current mapping:" << endl;
 
-		for (int y = 0; y < coreRows; y++) {
-			for (int x = 0; x < coreColumns; x++) {
-				if (x > 0) {
-					cout << " ";
-				}
-				int coreId = getCoreNb(y, x);
-				if (!isAssignedToTask(coreId)) {
-					cout << "  . ";
-				} else {
-					if (systemCores[coreId].assignedTaskID < 10) {
+		for (int z = 0; z < coresInZ; z++) {
+			if (coresInZ > 1) {
+				cout << "Core layer " << z << ":" << endl;
+			}
+			for (int y = 0; y < coresInY; y++) {
+				for (int x = 0; x < coresInX; x++) {
+					if (x > 0) {
 						cout << " ";
 					}
-
-					char marker1 = '?';
-					char marker2 = '?';
-					if (isAssignedToThread(coreId)) {
-						Core::State state = m_thread_manager->getThreadState(systemCores[coreId].assignedThreadID);
-						if (state == Core::State::RUNNING) {
-							marker1 = '*';
-							marker2 = '*';
-						} else {
-							marker1 = '-';
-							marker2 = '-';
-						}
+					int coreId = getCoreNb(x, y, z);
+					if (!isAssignedToTask(coreId)) {
+						cout << "  . ";
 					} else {
-						marker1 = '(';
-						marker2 = ')';
-					}
+						if (systemCores[coreId].assignedTaskID < 10) {
+							cout << " ";
+						}
 
-					cout << marker1 << systemCores[coreId].assignedTaskID << marker2;
+						char marker1 = '?';
+						char marker2 = '?';
+						if (isAssignedToThread(coreId)) {
+							Core::State state = m_thread_manager->getThreadState(systemCores[coreId].assignedThreadID);
+							if (state == Core::State::RUNNING) {
+								marker1 = '*';
+								marker2 = '*';
+							} else {
+								marker1 = '-';
+								marker2 = '-';
+							}
+						} else {
+							marker1 = '(';
+							marker2 = ')';
+						}
+
+						cout << marker1 << systemCores[coreId].assignedTaskID << marker2;
+					}
 				}
+				cout << endl;
 			}
-			cout << endl;
 		}
 	}
 

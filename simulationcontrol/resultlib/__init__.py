@@ -1,3 +1,4 @@
+import collections
 import diskcache
 import gzip
 import io
@@ -10,9 +11,8 @@ except ImportError:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RESULT_DIRS = [RESULTS_FOLDER]
-NAME_REGEX = r'results_(\d+-\d+-\d+_\d+.\d+)_([a-zA-Z0-9_\.\+]+)_((splash2|parsec)-.*)'
+NAME_REGEX = r'results_(\d+-\d+-\d+_\d+.\d+)_([a-zA-Z0-9_\.\+]*)_((splash2|parsec)-.*)'
 
-print(NAME_REGEX)
 
 cache = diskcache.Cache(directory=os.path.join(HERE, 'cache'))
 
@@ -48,6 +48,7 @@ def _open_file(run, filename):
 def get_date(run):
     m = re.search(NAME_REGEX, run)
     return m.group(1)
+
 
 def get_config(run):
     m = re.search(NAME_REGEX, run)
@@ -102,77 +103,6 @@ def get_individual_response_times(run):
         return [resp_times[task] for task in keys]
 
 
-@cache.memoize()
-def get_individual_start_times(run):
-    start_times = {}
-    with _open_file(run, 'execution.log') as f:
-        for line in f:
-            m = re.search(r'\[Scheduler\]: Trying to schedule Task (?P<task>\d+) at Time (?P<time>\d+) ns', line)
-            if m is not None:
-                task = int(m.group('task'))
-                t = int(m.group('time'))
-                start_times[task] = t
-    start_keys = sorted(start_times.keys())
-    if start_keys == []:
-        raise Exception('task(s) missing (non found)')
-    elif start_keys != list(range(max(start_keys)+1)):
-        raise Exception('task(s) missing')
-    else:
-        return [start_times[task] for task in start_keys]
-
-
-@cache.memoize()
-def get_individual_energies(run):
-    """
-    get energy consumption per task
-    """
-    start_times = get_individual_start_times(run)
-    response_times = get_individual_response_times(run)
-    end_times = [start_times[i] + response_times[i] for i in range(len(start_times))]
-    traces = get_power_traces(run)
-    power_values = [sum(ps) for ps in zip(*traces)]
-
-    energies = [0] * len(start_times)
-
-    dt = 100000
-    for i, p in enumerate(power_values):
-        t = i * dt
-        active_tasks = [i for i in range(len(start_times)) if start_times[i] <= t and end_times[i] > t]
-        for t in active_tasks:
-            energies[t] += p / len(active_tasks) * dt / 1e9
-
-    # double check
-    assert abs(sum(energies) - get_energy(run)) < 0.01, '{:.2f} != {:.2f}'.format(sum(energies), get_energy(run))
-    return energies
-
-
-@cache.memoize()
-def get_average_power_consumption(run):
-    traces = get_power_traces(run)
-    power_values = [sum(ps) for ps in zip(*traces)]
-    return avg(power_values)
-
-
-@cache.memoize()
-def get_peak_power_consumption_single_thread(run):
-    traces = get_power_traces(run)
-    return max(max(trace) for trace in traces)
-
-
-@cache.memoize()
-def get_energy(run):
-    power = get_average_power_consumption(run)
-    simulation_time = get_total_simulation_time(run)
-    if simulation_time in ('-',):
-        return '-'
-    time = simulation_time / 1e9
-    return power * time
-
-
-def avg(data):
-    return float(sum(data)) / len(data)
-
-
 def _get_traces(run, filename, multiplicator=1):
     traces = []
 
@@ -185,55 +115,72 @@ def _get_traces(run, filename, multiplicator=1):
     return list(zip(*traces))
 
 
-def get_power_traces(run):
-    return _get_traces(run, 'PeriodicPower.log')
+def _get_header(run, filename):
+    with _open_file(run, filename) as f:
+        header = f.readline().split()
+    return header
 
 
-def get_temperature_traces(run):
-    return _get_traces(run, 'PeriodicThermal.log')
+def _get_named_traces(run, filename, multiplicator=1):
+    traces = []
+
+    with _open_file(run, filename) as f:
+        header = f.readline().split()
+        for line in f:
+            vs = [multiplicator * float(v) for v in line.split()]
+            traces.append(vs)
+    traces = list(zip(*traces))
+
+    return collections.OrderedDict((h, t) for h, t in zip(header, traces))
 
 
-def get_peak_temperature_traces(run):
-    traces = get_temperature_traces(run)
+def get_core_power_traces(run):
+    header = _get_header(run, 'combined_power.trace')
+    assert all(h.startswith('C') for h in header[:count_cores(run)])  # simple check for order or header
+    traces = _get_traces(run, 'combined_power.trace')
+    return traces[:count_cores(run)]
+
+
+def get_memory_power_traces(run):
+    header = _get_header(run, 'combined_power.trace')
+    assert all(h.startswith('B') for h in header[count_cores(run):])  # simple check for order or header
+    traces = _get_traces(run, 'combined_power.trace')
+    return traces[count_cores(run):]
+
+
+def get_core_temperature_traces(run):
+    header = _get_header(run, 'combined_temperature.trace')
+    assert all(h.startswith('C') for h in header[:count_cores(run)])  # simple check for order or header
+    traces = _get_traces(run, 'combined_temperature.trace')
+    return traces[:count_cores(run)]
+
+
+def get_memory_temperature_traces(run):
+    header = _get_header(run, 'combined_temperature.trace')
+    assert all(h.startswith('B') for h in header[count_cores(run):])  # simple check for order or header
+    traces = _get_traces(run, 'combined_temperature.trace')
+    return traces[count_cores(run):]
+
+
+def get_core_peak_temperature_traces(run):
+    traces = get_core_temperature_traces(run)
     peak = []
     for values in zip(*traces):
         peak.append(max(values))
     return [peak]
 
 
-@cache.memoize()
-def get_average_peak_temperature(run):
-    trace = get_peak_temperature_traces(run)[0]
-    return avg(trace)
+def get_all_temperature_traces(run):
+    traces = _get_named_traces(run, 'combined_temperature.trace')
+    return traces
 
 
-@cache.memoize()
-def get_rel_duration_temperature_violation(run, max_temperature=80):
-    trace = get_peak_temperature_traces(run)[0]
-    return sum(1 for t in trace if t > max_temperature) / len(trace)
+def get_rvalues_traces(run):
+    return _get_traces(run, 'combined_rvalue.trace')
 
 
-@cache.memoize()
-def get_area_temperature_violation(run, max_temperature=80):
-    trace = get_peak_temperature_traces(run)[0]
-    return sum(t - max_temperature for t in trace if t > max_temperature) / len(trace)
-
-
-@cache.memoize()
-def get_rel_duration_temperature_violation_per_core(run, max_temperature=80):
-    traces = get_temperature_traces(run)
-    violations = []
-    for trace in traces:
-        violations.append(sum(1 for t in trace if t > max_temperature) / len(trace))
-    return violations
-
-
-def exists_full_freq_trace(run):
-    try:
-        with _open_file(run, 'PeriodicFrequency.log') as f:
-            return True
-    except:
-        return False
+def get_all_rvalues_traces(run):
+    return _get_named_traces(run, 'combined_rvalue.trace')
 
 
 @cache.memoize()
@@ -245,6 +192,7 @@ def get_cpi_stack_trace_parts(run):
             part = line.split()[0]
             if part not in parts:
                 parts.append(part)
+    assert len(parts) > 0, 'empty PeriodicCPIStack.log'
     return parts
 
 
@@ -285,7 +233,7 @@ def _divide_traces(numerator, denominator):
 
 
 def get_ips_traces(run):
-    return _divide_traces(get_freq_traces(run), get_cpi_traces(run, raw=True))
+    return _divide_traces(get_core_freq_traces(run), get_cpi_traces(run, raw=True))
 
 
 def get_cpi_traces(run, raw=False):
@@ -299,49 +247,30 @@ def get_cpi_traces(run, raw=False):
     return traces
 
 
-def get_nuca_cpi_traces(run):
-    return _add_traces(get_cpi_stack_part_trace(run, 'mem-nuca'), get_cpi_stack_part_trace(run, 'ifetch'))
-
-
-def get_freq_traces(run):
+def get_core_freq_traces(run):
     return _get_traces(run, 'PeriodicFrequency.log', multiplicator=1e9)
 
 
-@cache.memoize()
-def get_max_freq(run):
-    return max(max(t) for t in get_freq_traces(run))
-
-
-def get_rel_nuca_traces(run):
-    return _divide_traces(get_nuca_cpi_traces(run), get_cpi_stack_part_trace(run, 'total'))
-
-
-def get_utilization_traces(run):
-    return _divide_traces(get_cpi_stack_part_trace(run, 'base'), get_cpi_stack_part_trace(run, 'total'))
+def get_core_utilization_traces(run):
+    cpi = None
+    for part in get_cpi_stack_trace_parts(run):
+        blacklist = ['total', 'mem', 'ifetch', 'sync', 'dvfs-transition', 'imbalance', 'other']
+        if all(b not in part for b in blacklist):
+            part_trace = get_cpi_stack_part_trace(run, part)
+            if cpi is None:
+                cpi = part_trace
+            else:
+                cpi = _add_traces(cpi, part_trace)
+    assert cpi is not None, 'no valid CPI stack parts found to calculate utilization'
+    return _divide_traces(cpi, get_cpi_stack_part_trace(run, 'total'))
 
 
 @cache.memoize()
 def count_cores(run):
-    return len(get_power_traces(run))
+    return len(get_core_freq_traces(run))
 
 
 @cache.memoize()
 def get_active_cores(run):
-    utilization_traces = get_utilization_traces(run)
+    utilization_traces = get_core_utilization_traces(run)
     return [i for i, utilization in enumerate(utilization_traces) if max(utilization) > 0.01]
-
-
-@cache.memoize()
-def get_average_system_utilization(run):
-    from .replay import Execution
-    ex = Execution(run)
-    ex.replay()
-    return ex.average_system_utilization
-
-
-@cache.memoize()
-def get_peak_system_utilization(run):
-    from .replay import Execution
-    ex = Execution(run)
-    ex.replay()
-    return ex.peak_system_utilization

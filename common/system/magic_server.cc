@@ -11,6 +11,10 @@
 #include "stats.h"
 #include "timer.h"
 #include "thread.h"
+#include "print_trace.h"
+
+extern vector<read_trace_data> rdt;
+extern vector<write_trace_data> wrt;
 
 MagicServer::MagicServer()
       : m_performance_enabled(false)
@@ -129,9 +133,8 @@ void MagicServer::enablePerformance()
 
 void MagicServer::disablePerformance()
 {
-   Simulator::disablePerformanceModels();
+	Simulator::disablePerformanceModels();
    Sim()->getStatsManager()->recordStats("roi-end");
-
    float seconds = t_start.getTime() / 1e9;
    UInt64 ninstrs = getGlobalInstructionCount() - ninstrs_start;
    UInt64 cycles = SubsecondTime::divideRounded(Sim()->getClockSkewMinimizationServer()->getGlobalTime(),
@@ -184,6 +187,9 @@ UInt64 MagicServer::setPerformance(bool enabled)
    }
    else
    {
+      print_dram_trace();
+      printf("\n");
+
       Sim()->getHooksManager()->callHooks(HookType::HOOK_ROI_END, 0);
       printf("[SNIPER] Disabling performance models\n");
       float seconds = t_start.getTime() / 1e9;
@@ -197,7 +203,6 @@ UInt64 MagicServer::setPerformance(bool enabled)
       enablePerformance();
    else
       disablePerformance();
-
    return 0;
 }
 

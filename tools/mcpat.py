@@ -23,6 +23,7 @@ DRAM_POWER_STATIC_TSV_INTERFACE = .00934/8 # 9.34mW for 64-bit data bus
 DRAM_CHIPS_PER_DIMM = 8
 DRAM_DIMMS_PER_SOCKET = 4
 
+
 # Round up to the next nearest power of 2 if the number isn't already a power of two
 # Inspiration from http://stackoverflow.com/questions/53161/find-the-highest-order-bit-in-c
 power2up_warnings = {}
@@ -69,7 +70,6 @@ def compute_dram_power(nread, nwrite, t, config):
   return (power_socket_dyn * sockets, power_socket_stat * sockets)
 
 
-  
 def dram_power(results, config):
   return compute_dram_power(
     sum(results['dram.reads']),
@@ -131,10 +131,8 @@ def log_frequencies(results):
   ncores = int(results['config']['general/total_cores'])
   frequencies = [float(results['config']['perf_model/core/frequency'].get(i)) for i in range(ncores)]
 
-  # gkothar1
-  filename = os.path.join(results['config']['general/output_dir'],
-                          'PeriodicFrequency.log')
-
+  filename = 'PeriodicFrequency.log'
+  os.system("touch "+ filename)
   write_header = os.stat(filename).st_size == 0
   with open(filename, 'a') as f:
     if write_header:
@@ -159,13 +157,19 @@ def log_vdd(results):
       raise Exception('do not know how to scale vdd to {} nm'.format(size_nm))
   vdd = [float(results['config']['power/vdd'].get(i))*scale for i in range(ncores)]
 
-  # gkothar1
-  filename = os.path.join(results['config']['general/output_dir'],
-                          'PeriodicVdd.log')
-
+  filename = 'PeriodicVdd.log'
+  os.system("touch "+ filename)
   write_header = os.stat(filename).st_size == 0
   with open(filename, 'a') as f:
     if write_header:
+      f.write('\t'.join('Core{}'.format(i) for i in range(ncores)))
+      f.write('\n')
+    f.write('\t'.join('{:.3f}'.format(f) for f in vdd))
+    f.write('\n')
+
+  filename = 'InstantVdd.log'
+  with open(filename, 'w') as f:
+    if os.stat(filename).st_size == 0:
       f.write('\t'.join('Core{}'.format(i) for i in range(ncores)))
       f.write('\n')
     f.write('\t'.join('{:.3f}'.format(f) for f in vdd))
@@ -176,12 +180,9 @@ def log_cpi_stack(results):
   cpiStackData = cpiStack.get_data('cpi')
 
   ncores = int(results['config']['general/total_cores'])
-
-  # gkothar1
-  cpi_stack_file = os.path.join(results['config']['general/output_dir'],
-                                'InstantaneousCPIStack.log')
-  cpi_stack_periodic_file = os.path.join(
-      results['config']['general/output_dir'], 'PeriodicCPIStack.log')
+  cpi_stack_file = 'InstantaneousCPIStack.log'
+  cpi_stack_periodic_file = 'PeriodicCPIStack.log'
+  os.system("touch "+ cpi_stack_periodic_file)
 
   labels = cpiStack.cpiitems.names
   compactify = ('issue', 'sync', 'imbalance')
@@ -318,7 +319,7 @@ def main(jobid, resultsdir, outputfile, powertype = 'dynamic', config = None, no
   time0_begin = results['results']['global.time_begin']
   time0_end = results['results']['global.time_end']
   seconds = (time0_end - time0_begin)/1e15
-  results = power_stack(power_dat,results['config'], powertype)
+  results = power_stack(power_dat,results['config'], powertype)  
   # Plot stack
   plot_labels = []
   plot_data = {}
@@ -378,7 +379,6 @@ def main(jobid, resultsdir, outputfile, powertype = 'dynamic', config = None, no
   if return_data:
     return {'labels': plot_labels, 'power_data': plot_data, 'ncores': ncores, 'time_s': seconds}
 
-
 def scale_power(suffix, power, size_nm):
   if suffix == 'Runtime Dynamic':
     if size_nm >= 22:
@@ -396,13 +396,13 @@ def scale_power(suffix, power, size_nm):
   else:
     raise Exception('do not know how to scale power: {}'.format(suffix))
 
-
-def power_stack(power_dat, cfg, powertype = 'total',  nocollapse = False):
+def power_stack(power_dat, cfg, powertype = 'total', nocollapse = False):
   size_nm = int(sniper_config.get_config(cfg, "power/technology_node"))
   def getpower(powers, key = None):
     def getcomponent(suffix):
       if key: return scale_power(suffix, powers.get(key+'/'+suffix, 0), size_nm)
-      else: return scale_power(suffix, powers.get(suffix, 0), size_nm)
+      else: return scale_power(suffix, powers.get(suffix, 0), size_nm)        
+    #print(powers)          #needed for debug
     if powertype == 'dynamic':
       return getcomponent('Runtime Dynamic')
     elif powertype == 'static':
@@ -417,11 +417,6 @@ def power_stack(power_dat, cfg, powertype = 'total',  nocollapse = False):
       return getcomponent('Area') + getcomponent('Area Overhead')
     else:
       raise ValueError('Unknown powertype %s' % powertype)
-  
-  #for core in power_dat['Core']:
-   #corePower = getpower(core, 'Instruction Fetch Unit/Instruction Cache')
-   #print "Power", corePower
-
   data = {
     'l2':               sum([ getpower(cache) for cache in power_dat.get('L2', []) ])  # shared L2
                         + sum([ getpower(core, 'L2') for core in power_dat['Core'] ]), # private L2
@@ -452,109 +447,187 @@ def power_stack(power_dat, cfg, powertype = 'total',  nocollapse = False):
                               for core in power_dat['Core']
                             ]),
   }
+  full_power_trace_file = cfg.get('hotspot/log_files_core/full_power_trace_file')
+  power_trace_file = cfg.get('hotspot/log_files_core/power_trace_file')
+  full_temperature_trace_file = cfg.get('hotspot/log_files_core/full_temperature_trace_file')
+  type_of_stack = cfg.get('memory/type_of_stack')
+  
   data['core-other'] = getpower(power_dat['Processor']) - (sum(data.values()) - data['dram'])
+  powerLogFileName = file(full_power_trace_file, 'a');
+  powerInstantaneousFileName = file(power_trace_file, 'w');
+  if (type_of_stack == "DDR" or type_of_stack == "3Dmem"):
+    if (sniper_config.get_config(cfg, "core_thermal/enabled") == 'true'):
+      thermalLogFileName = file(full_temperature_trace_file, 'a');
 
-  # gkothar1
-  powerLogFileName = file(
-      os.path.join(sniper_config.get_config(cfg, "general/output_dir"),
-                   "PeriodicPower.log"), 'a')
-  powerInstantaneousFileName = file(
-      os.path.join(sniper_config.get_config(cfg, "general/output_dir"),
-                   "InstantaneousPower.log"), 'w')
-
-  if (sniper_config.get_config(cfg, "periodic_thermal/enabled") == 'true'):
-    thermalLogFileName = file(os.path.join(sniper_config.get_config(cfg, "general/output_dir"), "PeriodicThermal.log"), 'a')
-
+  
   id = 0
   Headings = ""
 
-  if sniper_config.get_config_bool(cfg, "periodic_power/l3"):  
+  if sniper_config.get_config_bool(cfg, "core_power/l3"):  
     Headings += "L3\t" # Private L3
 
   for core in power_dat['Core']:
+#   if sniper_config.get_config_bool(cfg, "core_power/l2"):  
+#    Headings += "Core"+str(id)+"-L2\t" # Private L2
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/is"):
+#    Headings += "Core"+str(id)+"-IS\t" # Instruction Scheduler
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/rf"):
+#    Headings += "Core"+str(id)+"-RF\t" # Register Files
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/rbb"):
+#    Headings += "Core"+str(id)+"-RBB\t" # Result Broadcast Bus
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/ru"):
+#    Headings += "Core"+str(id)+"-RU\t" # Renaming Unit
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/bp"):
+#    Headings += "Core"+str(id)+"-BP\t" # Branch Predictor
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/btb"):
+#    Headings += "Core"+str(id)+"-BTB\t" # Branch Target Buffer
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/ib"):
+#    Headings += "Core"+str(id)+"-IB\t" # Instruction Buffer
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/id"):
+#    Headings += "Core"+str(id)+"-ID\t" # Instruction Decoder
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/ic"):
+#    Headings += "Core"+str(id)+"-IC\t" # Instruction Cache
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/dc"):
+#    Headings += "Core"+str(id)+"-DC\t" # Data Cache
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/calu"):
+#    Headings += "Core"+str(id)+"-CALU\t" # Complex ALU
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/falu"):
+#    Headings += "Core"+str(id)+"-FALU\t" # Floating Point ALU
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/ialu"):
+#    Headings += "Core"+str(id)+"-IALU\t" # Integer ALU
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/lu"):
+#    Headings += "Core"+str(id)+"-LU\t" # Load Unit
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/su"):
+#    Headings += "Core"+str(id)+"-SU\t" # Store Unit
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/mmu"):
+#    Headings += "Core"+str(id)+"-MMU\t" # Memory Management Unit
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/ifu"):
+#    Headings += "Core"+str(id)+"-IFU\t" # Instruction Fetch Unit
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/lsu"):
+#    Headings += "Core"+str(id)+"-LSU\t" # Load Store Unit
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/eu"):
+#    Headings += "Core"+str(id)+"-EU\t" # Execution Unit
+#   
+#   if sniper_config.get_config_bool(cfg, "core_power/tp"):
+#    #Headings += "Core"+str(id)+"-TP\t" # Total Power
+#    Headings += "C_"+str(id)+"\t" # Total Power
+
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/l2"):  
-    Headings += "Core"+str(id)+"-L2\t" # Private L2
+   if sniper_config.get_config_bool(cfg, "core_power/fpu"):
+    Headings += "C_"+str(id)+"_FPU\t" # Floating Point Unit
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/is"):
-    Headings += "Core"+str(id)+"-IS\t" # Instruction Scheduler
+   if sniper_config.get_config_bool(cfg, "core_power/rbb"):
+    Headings += "C_"+str(id)+"_RBB\t" # Result Broadcast Bus
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/rf"):
-    Headings += "Core"+str(id)+"-RF\t" # Register Files
+   if sniper_config.get_config_bool(cfg, "core_power/ren"):
+    Headings += "C_"+str(id)+"_REN\t" # Renaming Unit
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/rbb"):
-    Headings += "Core"+str(id)+"-RBB\t" # Result Broadcast Bus
+   if sniper_config.get_config_bool(cfg, "core_power/mmu"):
+    Headings += "C_"+str(id)+"_MMU\t" # Memory Management Unit
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/ru"):
-    Headings += "Core"+str(id)+"-RU\t" # Renaming Unit
+   if sniper_config.get_config_bool(cfg, "core_power/other"):
+    Headings += "C_"+str(id)+"_Other\t" # Memory Management Unit
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/bp"):
-    Headings += "Core"+str(id)+"-BP\t" # Branch Predictor
+   if sniper_config.get_config_bool(cfg, "core_power/iw"):
+    Headings += "C_"+str(id)+"_IW\t" # Instruction Window
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/btb"):
-    Headings += "Core"+str(id)+"-BTB\t" # Branch Target Buffer
+   if sniper_config.get_config_bool(cfg, "core_power/fpiw"):
+    Headings += "C_"+str(id)+"_FPIW\t" # FP Instruction Window
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/ib"):
-    Headings += "Core"+str(id)+"-IB\t" # Instruction Buffer
+   if sniper_config.get_config_bool(cfg, "core_power/rob"):
+    Headings += "C_"+str(id)+"_ROB\t" # Reorder Buffer
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/id"):
-    Headings += "Core"+str(id)+"-ID\t" # Instruction Decoder
+   if sniper_config.get_config_bool(cfg, "core_power/irf"):
+    Headings += "C_"+str(id)+"_IRF\t" # Integer Register Files
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/ic"):
-    Headings += "Core"+str(id)+"-IC\t" # Instruction Cache
+   if sniper_config.get_config_bool(cfg, "core_power/fprf"):
+    Headings += "C_"+str(id)+"_FPRF\t" # FP Register Files
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/dc"):
-    Headings += "Core"+str(id)+"-DC\t" # Data Cache
+   if sniper_config.get_config_bool(cfg, "core_power/calu"):
+    Headings += "C_"+str(id)+"_CALU\t" # Complex ALU
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/calu"):
-    Headings += "Core"+str(id)+"-CALU\t" # Complex ALU
+   if sniper_config.get_config_bool(cfg, "core_power/ialu"):
+    Headings += "C_"+str(id)+"_IALU\t" # Integer ALU
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/falu"):
-    Headings += "Core"+str(id)+"-FALU\t" # Floating Point ALU
+   if sniper_config.get_config_bool(cfg, "core_power/btb"):
+    Headings += "C_"+str(id)+"_BTB\t" # Branch Target Buffer
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/ialu"):
-    Headings += "Core"+str(id)+"-IALU\t" # Integer ALU
+   if sniper_config.get_config_bool(cfg, "core_power/bp"):
+    Headings += "C_"+str(id)+"_BP\t" # Branch Predictor
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/lu"):
-    Headings += "Core"+str(id)+"-LU\t" # Load Unit
+   if sniper_config.get_config_bool(cfg, "core_power/lq"):
+    Headings += "C_"+str(id)+"_LQ\t" # Load Queue
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/su"):
-    Headings += "Core"+str(id)+"-SU\t" # Store Unit
+   if sniper_config.get_config_bool(cfg, "core_power/sq"):
+    Headings += "C_"+str(id)+"_SQ\t" # Store Queue
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/mmu"):
-    Headings += "Core"+str(id)+"-MMU\t" # Memory Management Unit
+   if sniper_config.get_config_bool(cfg, "core_power/dc"):
+    Headings += "C_"+str(id)+"_DC\t" # Data Cache
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/ifu"):
-    Headings += "Core"+str(id)+"-IFU\t" # Instruction Fetch Unit
+   if sniper_config.get_config_bool(cfg, "core_power/id"):
+    Headings += "C_"+str(id)+"_ID\t" # Instruction Decoder
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/lsu"):
-    Headings += "Core"+str(id)+"-LSU\t" # Load Store Unit
+   if sniper_config.get_config_bool(cfg, "core_power/ib"):
+    Headings += "C_"+str(id)+"_IB\t" # Instruction Buffer
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/eu"):
-    Headings += "Core"+str(id)+"-EU\t" # Execution Unit
+   if sniper_config.get_config_bool(cfg, "core_power/ic"):
+    Headings += "C_"+str(id)+"_IC\t" # Instruction Cache
    
-   if sniper_config.get_config_bool(cfg, "periodic_power/tp"):
-    Headings += "Core"+str(id)+"-TP\t" # Total Power
+   if sniper_config.get_config_bool(cfg, "core_power/l2"):  
+    Headings += "C_"+str(id)+"_L2\t" # Private L2
+   
+   if sniper_config.get_config_bool(cfg, "core_power/tp"):
+    #Headings += "Core"+str(id)+"-TP\t" # Total Power
+    Headings += "C_"+str(id)+"\t" # Total Power
 
    id = id+1
-
-  #gkothar1
-  needInitializing = os.stat(
-      os.path.join(sniper_config.get_config(cfg, "general/output_dir"),
-                   "PeriodicPower.log")).st_size == 0
-
+   
+  os.system("touch " + full_power_trace_file)
+  needInitializing = os.stat(full_power_trace_file).st_size == 0
   if needInitializing:
     powerLogFileName.write (Headings+"\n")
-    if (sniper_config.get_config(cfg, "periodic_thermal/enabled") == 'true'):
-     thermalLogFileName.write (Headings+"\n")
+    if (type_of_stack == "DDR" or type_of_stack == "3Dmem"):
+      if (sniper_config.get_config(cfg, "core_thermal/enabled") == 'true'):
+       thermalLogFileName.write (Headings+"\n")
+       thermalLogFileName.close()
 
   powerInstantaneousFileName.write (Headings+"\n")
-   
+
+  if needInitializing and sniper_config.get_config_bool(cfg, 'reliability/enabled'):
+    data_len = len(Headings.strip().split('\t'))
+    with open(sniper_config.get_config(cfg, 'reliability/log_files_core/rvalue_trace_file'), "w") as f:
+        f.write("%s\n" %(Headings))
+    with open(sniper_config.get_config(cfg, 'reliability/log_files_core/full_rvalue_trace_file'), "w") as f:
+        f.write("%s\n" %(Headings))
+    with open(sniper_config.get_config(cfg, 'reliability/log_files_core/state_file'), "w") as f:
+        f.write("0.0\t"*data_len+"\n")
+    with open(sniper_config.get_config(cfg, 'reliability/log_files_core/delta_v_file'), "w") as f:
+        f.write("0.0\t"*data_len+"\n")
+
   Readings = ""
 
   L3Power = sum([ getpower(cache) for cache in power_dat.get('L3', []) ]) 
 
-  if sniper_config.get_config_bool(cfg, "periodic_power/l3"):  
+  if sniper_config.get_config_bool(cfg, "core_power/l3"):  
     Readings += str(L3Power)+"\t"  # Private L3
   
   amtCores = len(power_dat['Core'])
@@ -564,88 +637,70 @@ def power_stack(power_dat, cfg, powertype = 'total',  nocollapse = False):
     LSUPower =  getpower(core, 'Load Store Unit/Data Cache') + getpower(core, 'Load Store Unit/LoadQ') + getpower(core, 'Load Store Unit/StoreQ')
     EUPower = getpower(core, 'Execution Unit/Instruction Scheduler') + getpower(core, 'Execution Unit/Register Files') + getpower(core, 'Execution Unit/Results Broadcast Bus') + getpower(core, 'Execution Unit/Complex ALUs') + getpower(core, 'Execution Unit/Floating Point Units') + getpower(core, 'Execution Unit/Integer ALUs')
 
-    if sniper_config.get_config_bool(cfg, "periodic_power/l2"):  
-      Readings += str(getpower(core, 'L2'))+"\t"  # Private L2
-    if sniper_config.get_config_bool(cfg, "periodic_power/is"):
-      Readings += str(getpower(core, 'Execution Unit/Instruction Scheduler'))+"\t" # Instruction Scheduler
-    if sniper_config.get_config_bool(cfg, "periodic_power/rf"):
-      Readings += str(getpower(core, 'Execution Unit/Register Files'))+"\t"  # Register Files
-    if sniper_config.get_config_bool(cfg, "periodic_power/rbb"):
-      Readings += str(getpower(core, 'Execution Unit/Results Broadcast Bus'))+"\t"  # Result Broadcast Bus
-    if sniper_config.get_config_bool(cfg, "periodic_power/ru"):
-      Readings += str(getpower(core, 'Renaming Unit'))+"\t" # Renaming Unit
-    if sniper_config.get_config_bool(cfg, "periodic_power/bp"):
-      Readings += str(getpower(core, 'Instruction Fetch Unit/Branch Predictor'))+"\t"  # Branch Predictor
-    if sniper_config.get_config_bool(cfg, "periodic_power/btb"):
-      Readings += str(getpower(core, 'Instruction Fetch Unit/Branch Target Buffer'))+"\t"  # Branch Target Buffer
-    if sniper_config.get_config_bool(cfg, "periodic_power/ib"):
-      Readings += str(getpower(core, 'Instruction Fetch Unit/Instruction Buffer'))+"\t" # Instruction Buffer
-    if sniper_config.get_config_bool(cfg, "periodic_power/id"):
-      Readings += str(getpower(core, 'Instruction Fetch Unit/Instruction Decoder'))+"\t"  # Instruction Decoder
-    if sniper_config.get_config_bool(cfg, "periodic_power/ic"):
-      Readings += str(getpower(core, 'Instruction Fetch Unit/Instruction Cache'))+"\t"  # Instruction Cache
-    if sniper_config.get_config_bool(cfg, "periodic_power/dc"):
-      Readings += str(getpower(core, 'Load Store Unit/Data Cache'))+"\t" # Data Cache 
-    if sniper_config.get_config_bool(cfg, "periodic_power/calu"):
-      Readings += str(getpower(core, 'Execution Unit/Complex ALUs'))+"\t"  # Complex ALU
-    if sniper_config.get_config_bool(cfg, "periodic_power/falu"):
+    OtherPower = totalPower - (getpower(core, 'Execution Unit')
+                               + getpower(core, 'Instruction Fetch Unit')
+                               + getpower(core, 'Load Store Unit') 
+                               + getpower(core, 'Renaming Unit') 
+                               + getpower(core, 'Memory Management Unit') 
+                               + getpower(core, 'L2') 
+                               )
+    OtherPower = max(0, OtherPower)         #zero out small negative values
+
+    if sniper_config.get_config_bool(cfg, "core_power/fpu"):
+      power_local = str(getpower(core, 'Execution Unit/Floating Point Units'))+"\t"  # Floating Point ALU
       Readings += str(getpower(core, 'Execution Unit/Floating Point Units'))+"\t"  # Floating Point ALU
-    if sniper_config.get_config_bool(cfg, "periodic_power/ialu"):
-      Readings += str(getpower(core, 'Execution Unit/Integer ALUs'))+"\t"  # Integer ALU
-    if sniper_config.get_config_bool(cfg, "periodic_power/lu"): # Load Unit
+    if sniper_config.get_config_bool(cfg, "core_power/rbb"):
+      Readings += str(getpower(core, 'Execution Unit/Results Broadcast Bus'))+"\t"  
+    if sniper_config.get_config_bool(cfg, "core_power/ren"):
+      Readings += str(getpower(core, 'Renaming Unit'))+"\t" 
+    if sniper_config.get_config_bool(cfg, "core_power/mmu"): 
+      Readings += str(getpower(core, 'Memory Management Unit'))+"\t" 
+    if sniper_config.get_config_bool(cfg, "core_power/other"): 
+      Readings += str(OtherPower)+"\t"       #other
+    if sniper_config.get_config_bool(cfg, "core_power/iw"): 
+      Readings += str(getpower(core, 'Execution Unit/Instruction Scheduler/Instruction Window'))+"\t"
+    if sniper_config.get_config_bool(cfg, "core_power/fpiw"): 
+      Readings += str(getpower(core, 'Execution Unit/Instruction Scheduler/FP Instruction Window'))+"\t"
+    if sniper_config.get_config_bool(cfg, "core_power/rob"): 
+      Readings += str(getpower(core, 'Execution Unit/Instruction Scheduler/ROB'))+"\t"
+    if sniper_config.get_config_bool(cfg, "core_power/irf"):
+      Readings += str(getpower(core, 'Execution Unit/Register Files/Integer RF'))+"\t"  
+    if sniper_config.get_config_bool(cfg, "core_power/fprf"):
+      Readings += str(getpower(core, 'Execution Unit/Register Files/Floating Point RF'))+"\t" 
+    if sniper_config.get_config_bool(cfg, "core_power/calu"):
+      Readings += str(getpower(core, 'Execution Unit/Complex ALUs'))+"\t"  
+    if sniper_config.get_config_bool(cfg, "core_power/ialu"):
+      Readings += str(getpower(core, 'Execution Unit/Integer ALUs'))+"\t"  
+    if sniper_config.get_config_bool(cfg, "core_power/btb"):
+      Readings += str(getpower(core, 'Instruction Fetch Unit/Branch Target Buffer'))+"\t" 
+    if sniper_config.get_config_bool(cfg, "core_power/bp"):
+      Readings += str(getpower(core, 'Instruction Fetch Unit/Branch Predictor'))+"\t"  
+    if sniper_config.get_config_bool(cfg, "core_power/lq"): 
       Readings += str(getpower(core, 'Load Store Unit/LoadQ'))+"\t" 
-    if sniper_config.get_config_bool(cfg, "periodic_power/su"):  # Store Unit
+    if sniper_config.get_config_bool(cfg, "core_power/sq"):  
       Readings += str(getpower(core, 'Load Store Unit/StoreQ'))+"\t"  
-    if sniper_config.get_config_bool(cfg, "periodic_power/mmu"): # Memory Management Unit
-      Readings += str(getpower(core, 'Memory Management Unit'))+"\t"  # Memory Management Unit
-    if sniper_config.get_config_bool(cfg, "periodic_power/ifu"):
-      Readings += str(IFUPower) +"\t" # Instruction Fetch Unit
-    if sniper_config.get_config_bool(cfg, "periodic_power/lsu"):
-      Readings += str(LSUPower) +"\t"  # Load Store Unit
-    if sniper_config.get_config_bool(cfg, "periodic_power/eu"):
-      Readings += str(EUPower) +"\t"  # Execution Unit
-    if sniper_config.get_config_bool(cfg, "periodic_power/tp"):
+    if sniper_config.get_config_bool(cfg, "core_power/dc"):
+      Readings += str(getpower(core, 'Load Store Unit/Data Cache'))+"\t"
+    if sniper_config.get_config_bool(cfg, "core_power/id"):
+      Readings += str(getpower(core, 'Instruction Fetch Unit/Instruction Decoder'))+"\t"  
+    if sniper_config.get_config_bool(cfg, "core_power/ib"):
+      Readings += str(getpower(core, 'Instruction Fetch Unit/Instruction Buffer'))+"\t" 
+    if sniper_config.get_config_bool(cfg, "core_power/ic"):
+      Readings += str(getpower(core, 'Instruction Fetch Unit/Instruction Cache'))+"\t"  
+    if sniper_config.get_config_bool(cfg, "core_power/l2"):  
+      Readings += str(getpower(core, 'L2'))+"\t"  # Private L2
+
+    if sniper_config.get_config_bool(cfg, "core_power/tp"):
       Readings += str(totalPower) +"\t" # Total Power
 
-  powerInstantaneousFileName.write (Readings+"\n")
+  if (type_of_stack == "DDR" or type_of_stack == "3Dmem"):
+    powerInstantaneousFileName.write (Readings+"\r\n")
+  else:
+    powerInstantaneousFileName.write (Readings)
   powerInstantaneousFileName.close ()
 
   powerLogFileName.write (Readings+"\n")
   powerLogFileName.close()
-
-
-  if (sniper_config.get_config(cfg, "periodic_thermal/enabled") == 'true'):
-
-   #HotSpot Integration Code
-   with open(os.path.join(sniper_config.get_config(cfg, "general/output_dir"), "Interval.dat"), 'r') as f:
-     interval_ns = float(f.read())
-   interval_s = interval_ns * 1e-9
-
-   # gkothar1
-   hotspot_dir = os.path.dirname(__file__)
-   hotspot_dir = hotspot_dir[:hotspot_dir.rfind("/")]
-   hotspot_dir = os.path.join(hotspot_dir, "hotspot")
-   hotspot_binary = os.path.join(hotspot_dir, "hotspot")
-
-   floorplan = os.path.abspath(os.path.join(hotspot_dir, sniper_config.get_config(cfg, "periodic_thermal/floorplan")))
-
-   hotspot_args = ['-c', os.path.join(hotspot_dir, 'hotspot.config'),
-                  '-f', floorplan,
-                  '-sampling_intvl', str(interval_s),
-                  '-p', os.path.join(sniper_config.get_config(cfg, "general/output_dir"), 'InstantaneousPower.log'),
-                  '-o', os.path.join(sniper_config.get_config(cfg, "general/output_dir"), 'InstantaneousTemperature.log')]
-   if not needInitializing:
-     hotspot_args += ['-init_file', os.path.join(sniper_config.get_config(cfg, "general/output_dir"), 'Temperature.init')]
-
-   temperatures = subprocess.check_output([hotspot_binary] + hotspot_args)
-   with open(os.path.join(sniper_config.get_config(cfg, "general/output_dir"), 'Temperature.init'), 'w') as f:
-     f.write(temperatures)
-
-   with open(os.path.join(sniper_config.get_config(cfg, "general/output_dir"), 'InstantaneousTemperature.log'), 'r') as instTemperatureFile:
-     instTemperatureFile.readline()  # ignore first line that contains the header
-     thermalLogFileName.write(instTemperatureFile.readline())
-
-   thermalLogFileName.close()
 
   return buildstack.merge_items({ 0: data }, all_items, nocollapse = nocollapse)
 
@@ -719,6 +774,11 @@ def edit_XML(statsobj, stats, cfg):
 #---------------------------
 
   cycles_scale = stats['fs_to_cycles_cores']
+  # the following conflicts with DVFS (frequencies are already updated in main)
+  # this code breaks CPI stack computations, resulting in CPI base > CPI total
+  # clock_core = float(sniper_config.get_config(cfg, 'perf_model/core/frequency', 0))*1000
+  # for core in range(ncores):
+  #   cycles_scale[core] = float(clock_core/1000000000)
   instrs = stats['performance_model.instruction_count']
   times = stats['performance_model.elapsed_time']
   cycles = map(lambda c, t: c * t, cycles_scale[:ncores], times[:ncores])
@@ -995,9 +1055,11 @@ def edit_XML(statsobj, stats, cfg):
           elif template[i][1][0]=="itlb.total_accesses":        #itlb equals icache reads and writes
             template[i][0] = template[i][0] % int(stats['L1-I.loads'][core] + stats['L1-I.stores'][core])
           elif template[i][1][0]=="itlb.total_misses":
-            template[i][0] = template[i][0] % int(stats['L1-I.load-misses'][core] + stats['L1-I.store-misses'][core])
+            template[i][0] = template[i][0] % int(stats['itlb.miss'][core])
           elif template[i][1][0]=="icache.read_accesses":
             template[i][0] = template[i][0] % int(stats['L1-I.loads'][core])
+          elif template[i][1][0]=="icache.read_misses":
+            template[i][0] = template[i][0] % int(stats['L1-I.load-misses'][core])
           elif template[i][1][0]=="dtlb.total_accesses":        #dtlb equals dcache reads and writes
             template[i][0] = template[i][0] % int(stats['L1-D.loads'][core] + stats['L1-D.stores'][core])
           elif template[i][1][0]=="dtlb.total_misses":
@@ -1107,7 +1169,7 @@ def edit_XML(statsobj, stats, cfg):
   return template, nuca_at_level
 #----------
 def readTemplate(ncores, num_l2s, private_l2s, num_l3s, technology_node):
-  device_type = 0  # 0: HP, 1: LSTP, 2: LOP
+  device_type = 0  # 0: HP, 1: LSTP, 2: LOP        
   Count = 0
   template=[]
   template.append(["<?xml version=\"1.0\" ?>",""])
@@ -1134,7 +1196,8 @@ def readTemplate(ncores, num_l2s, private_l2s, num_l3s, technology_node):
   template.append(["\t\t<param name=\"temperature\" value=\"330\"/> <!-- Kelvin -->",""])
   template.append(["\t\t<param name=\"number_cache_levels\" value=\"3\"/>",""])
   template.append(["\t\t<param name=\"interconnect_projection_type\" value=\"0\"/><!--0: agressive wire technology; 1: conservative wire technology -->",""])
-  template.append(["\t\t<param name=\"device_type\" value=\"{:d}\"/><!--0: HP(High Performance Type); 1: LSTP(Low standby power) 2: LOP (Low Operating Power)  -->".format(device_type),""])
+#  template.append(["\t\t<param name=\"device_type\" value=\"0\"/><!--0: HP(High Performance Type); 1: LSTP(Low standby power) 2: LOP (Low Operating Power)  -->",""])
+  template.append(["\t\t<param name=\"device_type\" value=\"{:d}\"/><!--0: HP(High Performance Type); 1: LSTP(Low standby power) 2: LOP (Low Operating Power)  -->".format(device_type),""])  
   template.append(["\t\t<param name=\"longer_channel_device\" value=\"1\"/><!-- 0 no use; 1 use when approperiate -->",""])
   template.append(["\t\t<param name=\"power_gating\" value=\"1\"/><!-- 0 not enabled; 1 enabled -->",""])
   template.append(["\t\t<param name=\"machine_bits\" value=\"64\"/>",""])
@@ -1356,7 +1419,7 @@ def readTemplate(ncores, num_l2s, private_l2s, num_l3s, technology_node):
     template.append(["\t\t\t\t<param name=\"buffer_sizes\" value=\"16, 16, 16, 0\"/>",""]) #mcpat will crash for some different sizes of 2nd parameter
     template.append(["\t\t\t\t<!-- cache controller buffer sizes: miss_buffer_size(MSHR),fill_buffer_size,prefetch_buffer_size,wb_buffer_size-->",""] )
     template.append(["\t\t\t\t<stat name=\"read_accesses\" value=\"%i\"/>",["icache.read_accesses","stat",iCount]])
-    template.append(["\t\t\t\t<stat name=\"read_misses\" value=\"0\"/>",""])
+    template.append(["\t\t\t\t<stat name=\"read_misses\" value=\"%i\"/>",["icache.read_misses","stat",iCount]])
     template.append(["\t\t\t\t<stat name=\"conflicts\" value=\"0\"/>",""] )
     template.append(["\t\t\t</component>",""])
     template.append(["\t\t\t<component id=\"system.core%i.dtlb\" name=\"dtlb\">"%iCount,""])
@@ -1394,7 +1457,8 @@ def readTemplate(ncores, num_l2s, private_l2s, num_l3s, technology_node):
     template.append(["\t\t\t\t<param name=\"buffer_sizes\" value=\"8, 8, 8, 8\"/>",""])
     template.append(["\t\t\t\t<param name=\"clockrate\" value=\"%i\"/>",["core_clock","cfg",iCount]])
     template.append(["\t\t\t\t<param name=\"ports\" value=\"1,1,1\"/>",""])
-    template.append(["\t\t\t\t<param name=\"device_type\" value=\"{:d}\"/>".format(device_type),""])
+#    template.append(["\t\t\t\t<param name=\"device_type\" value=\"0\"/>",""])
+    template.append(["\t\t\t\t<param name=\"device_type\" value=\"{:d}\"/>".format(device_type),""])    
     template.append(["\t\t\t\t<!-- altough there are multiple access types, Performance simulator needs to cast them into reads or writes         e.g. the invalidates can be considered as writes -->",""])
     template.append(["\t\t\t\t<stat name=\"read_accesses\" value=\"%i\"/>",["L1_directory.read_accesses","stat",iCount]])
     template.append(["\t\t\t\t<stat name=\"write_accesses\" value=\"%i\"/>",["L1_directory.write_accesses","stat",iCount]])
@@ -1410,7 +1474,8 @@ def readTemplate(ncores, num_l2s, private_l2s, num_l3s, technology_node):
     template.append(["\t\t\t\t<param name=\"buffer_sizes\" value=\"8, 8, 8, 8\"/>",""])
     template.append(["\t\t\t\t<param name=\"clockrate\" value=\"%i\"/>",["core_clock","cfg",iCount]])
     template.append(["\t\t\t\t<param name=\"ports\" value=\"1,1,1\"/>",""])
-    template.append(["\t\t\t\t<param name=\"device_type\" value=\"{:d}\"/>".format(device_type),""])
+#    template.append(["\t\t\t\t<param name=\"device_type\" value=\"0\"/>",""])
+    template.append(["\t\t\t\t<param name=\"device_type\" value=\"{:d}\"/>".format(device_type),""])    
     template.append(["\t\t\t\t<!-- altough there are multiple access types, Performance simulator needs to cast them into reads or writes         e.g. the invalidates can be considered as writes -->",""])
     template.append(["\t\t\t\t<stat name=\"read_accesses\" value=\"%i\"/>",["L2_directory.read_accesses","stat",iCount]])
     template.append(["\t\t\t\t<stat name=\"write_accesses\" value=\"%i\"/>",["L2_directory.write_accesses","stat",iCount]])
@@ -1427,7 +1492,8 @@ def readTemplate(ncores, num_l2s, private_l2s, num_l3s, technology_node):
     template.append(["\t\t\t\t<param name=\"clockrate\" value=\"%i\"/>",["L2_clock","cfg",iCount]])
     template.append(["\t\t\t\t<param name=\"vdd\" value=\"%f\"/><!-- 0 means using ITRS default vdd -->",["L2_vdd","cfg",iCount]])
     template.append(["\t\t\t\t<param name=\"ports\" value=\"1,1,1\"/>",""])
-    template.append(["\t\t\t\t<param name=\"device_type\" value=\"{:d}\"/>".format(device_type),""])
+#    template.append(["\t\t\t\t<param name=\"device_type\" value=\"0\"/>",""])
+    template.append(["\t\t\t\t<param name=\"device_type\" value=\"{:d}\"/>".format(device_type),""])   
     template.append(["\t\t\t\t<stat name=\"read_accesses\" value=\"%i\"/>",["L2.read_accesses","stat",iCount]])
     template.append(["\t\t\t\t<stat name=\"write_accesses\" value=\"%i\"/>",["L2.write_accesses","stat",iCount]])
     template.append(["\t\t\t\t<stat name=\"read_misses\" value=\"%i\"/>",["L2.read_misses","stat",iCount]])
@@ -1444,7 +1510,8 @@ def readTemplate(ncores, num_l2s, private_l2s, num_l3s, technology_node):
     template.append(["\t\t\t\t<param name=\"clockrate\" value=\"%i\"/>",["L3_clock","cfg",iCount]])
     template.append(["\t\t\t\t<param name=\"vdd\" value=\"%f\"/><!-- 0 means using ITRS default vdd -->",["L3_vdd","cfg",iCount]])
     template.append(["\t\t\t\t<param name=\"ports\" value=\"1,1,1\"/>",""])
-    template.append(["\t\t\t\t<param name=\"device_type\" value=\"{:d}\"/>".format(device_type),""])
+#    template.append(["\t\t\t\t<param name=\"device_type\" value=\"0\"/>",""])
+    template.append(["\t\t\t\t<param name=\"device_type\" value=\"{:d}\"/>".format(device_type),""])    
     template.append(["\t\t\t\t<param name=\"buffer_sizes\" value=\"16, 16, 16, 16\"/>",""])
     template.append(["\t\t\t\t<!-- cache controller buffer sizes: miss_buffer_size(MSHR),fill_buffer_size,prefetch_buffer_size,wb_buffer_size-->",""])
     template.append(["\t\t\t\t<stat name=\"read_accesses\" value=\"%i\"/>",["L3.read_accesses","stat",iCount]])                #populate with stats file

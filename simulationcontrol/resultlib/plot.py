@@ -1,3 +1,4 @@
+import collections
 import os
 import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -9,8 +10,9 @@ mpl.use('Agg')
 import math
 import matplotlib.pyplot as plt
 import numpy as np
-from resultlib import *
 import seaborn as sns
+
+import resultlib
 
 
 def smoothen(data, k):
@@ -32,60 +34,48 @@ def set_color_palette(num_colors):
         sns.set_palette(pal)
 
 
-def plot_trace(run, name, title, ylabel, traces_function, active_cores, yMin=None, yMax=None, smooth=None, force_recreate=False):
-    filename = os.path.join(find_run(run), '{}.png'.format(name))
+def plot_core_trace(run, name, title, ylabel, traces_function, active_cores, yMin=None, yMax=None, smooth=None, force_recreate=False, xlabel='Epoch'):
+    def f():
+        try:
+            traces = traces_function()
+        except KeyboardInterrupt:
+            raise
+        return collections.OrderedDict(('Core {}'.format(core), traces[core]) for core in active_cores)
+    plot_named_traces(run, name, title, ylabel, f, yMin=yMin, yMax=yMax, smooth=smooth, force_recreate=force_recreate, xlabel=xlabel)
+
+
+def plot_named_traces(run, name, title, ylabel, traces_function, yMin=None, yMax=None, smooth=None, force_recreate=False, xlabel='Epoch'):
+    filename = os.path.join(resultlib.find_run(run), '{}.png'.format(name))
 
     if not os.path.exists(filename) or force_recreate:
         try:
             traces = traces_function()
         except KeyboardInterrupt:
             raise
-        except:
-            print('>>> skipped {} {}'.format(run, name))
-            return
 
-        set_color_palette(len(active_cores))
+        set_color_palette(len(traces))
 
         plt.figure(figsize=(14,10))
         tracelen = 0
-        for core, trace in enumerate(traces):
-            if core in active_cores:
-                valid_trace = [value for value in trace if value is not None]
-                if len(valid_trace) > 0:
-                    #if yMin is not None:
-                    #    yMin = min(yMin, min(valid_trace) * 1.1)
-                    #if yMax is not None:
-                    #    yMax = max(yMax, max(valid_trace) * 1.1)
-                    tracelen = len(trace)
-                    if smooth is not None:
-                        trace = smoothen(trace, smooth)
-                    plt.plot(trace, label='Core {}'.format(core))
+        for name, trace in traces.items():
+            valid_trace = [value for value in trace if value is not None]
+            if len(valid_trace) > 0:
+                #if yMin is not None:
+                #    yMin = min(yMin, min(valid_trace) * 1.1)
+                #if yMax is not None:
+                #    yMax = max(yMax, max(valid_trace) * 1.1)
+                tracelen = len(trace)
+                if smooth is not None:
+                    trace = smoothen(trace, smooth)
+                plt.plot(trace, label=name)
         if yMin is not None:
             plt.ylim(bottom=yMin)
         if yMax is not None:
             plt.ylim(top=yMax)
-    
-        if name == 'rel_nuca_cpi' and 'x264-simsmall-1' in run:
-            phases = [(0.01, 0.09, 'red'),
-                      (0.12, 0.44, 'green'),
-                      (0.46, 0.68, 'blue'),
-                      (0.7, 0.78, 'orange'),
-                      (0.8, 0.99, 'purple')]
-        elif name == 'rel_nuca_cpi' and 'streamcluster-simsmall-3' in run:
-            phases = [(0.1, 0.45, 'red'),
-                      (0.65, 0.98, 'green')]
-        else:
-            phases = []
-        for start, end, color in phases:
-            start = int(start * tracelen)
-            end = int(end * tracelen)
-            plt.plot((start, start), (0.1, 0.4), c=color)
-            plt.plot((end, end), (0.1, 0.4), c=color)
-            plt.plot((start, end), (0.15, 0.15), c=color)
 
         plt.title('{} {}'.format(title, run))
         plt.legend()
-        plt.xlabel('Time (ms)')
+        plt.xlabel(xlabel)
         plt.ylabel(ylabel)
         plt.grid()
         plt.grid(which='minor', linestyle=':')
@@ -96,15 +86,15 @@ def plot_trace(run, name, title, ylabel, traces_function, active_cores, yMin=Non
 
 def plot_cpi_stack_trace(run, active_cores, force_recreate=False):
     blacklist = ['imbalance', 'sync', 'total', 'rs_full', 'serial', 'smt', 'mem-l4', 'mem-dram-cache', 'dvfs-transition', 'other']
-    parts = [part for part in get_cpi_stack_trace_parts(run) if not any(b in part for b in blacklist)]
-    traces = {part: get_cpi_stack_part_trace(run, part) for part in parts}
+    parts = [part for part in resultlib.get_cpi_stack_trace_parts(run) if not any(b in part for b in blacklist)]
+    traces = {part: resultlib.get_cpi_stack_part_trace(run, part) for part in parts}
 
     set_color_palette(len(parts))
 
     for core in active_cores:
         name = 'cpi-stack-trace-c{}'.format(core)
         title = 'cpi-stack-trace Core {}'.format(core)
-        filename = os.path.join(find_run(run), '{}.png'.format(name))
+        filename = os.path.join(resultlib.find_run(run), '{}.png'.format(name))
         if not os.path.exists(filename) or force_recreate:
             fig = plt.figure(figsize=(14,10))
             ax = fig.add_subplot(1, 1, 1)
@@ -118,8 +108,6 @@ def plot_cpi_stack_trace(run, active_cores, force_recreate=False):
             handles, labels = ax.get_legend_handles_labels()
             ax.legend(handles[::-1], labels[::-1], loc='upper left', bbox_to_anchor=(1, 1))
             
-            plt.xlabel('Time (ms)')
-            plt.ylabel('CPI')
             plt.grid()
             plt.grid(which='minor', linestyle=':')
             plt.minorticks_on()
@@ -129,21 +117,21 @@ def plot_cpi_stack_trace(run, active_cores, force_recreate=False):
 
 def create_plots(run, force_recreate=False):
     print('creating plots for {}'.format(run))
-    active_cores = get_active_cores(run)
+    active_cores = resultlib.get_active_cores(run)
 
-    plot_trace(run, 'frequency', 'Frequency', 'Frequency (GHz)', lambda: get_freq_traces(run), active_cores, yMin=0, yMax=4.1e9, force_recreate=force_recreate)
-    plot_trace(run, 'temperature', 'Temperature', 'Temperature (C)', lambda: get_temperature_traces(run), active_cores, yMin=45, yMax=100, force_recreate=force_recreate)
-    plot_trace(run, 'peak_temperature', 'Peak Temperature', 'Temperature (C)', lambda: get_peak_temperature_traces(run), [0], yMin=45, yMax=100, force_recreate=force_recreate)
-    plot_trace(run, 'power', 'Power', 'Power (W)', lambda: get_power_traces(run), active_cores, yMin=0, force_recreate=force_recreate)
-    plot_trace(run, 'utilization', 'Utilization', 'Utilization (%)', lambda: get_utilization_traces(run), active_cores, yMin=0, force_recreate=force_recreate)
-    plot_trace(run, 'rel_nuca_cpi', 'Rel. NUCA CPI', 'Rel. NUCA CPI', lambda: get_rel_nuca_traces(run), active_cores, yMin=0, force_recreate=force_recreate)
-    plot_trace(run, 'cpi', 'CPI', 'CPI', lambda: get_cpi_traces(run), active_cores, yMin=0, force_recreate=force_recreate)
-    #plot_trace(run, 'abs_nuca_cpi', 'Abs. NUCA CPI', 'Abs. NUCA CPI', lambda: get_nuca_cpi_traces(run), active_cores, yMin=0, force_recreate=force_recreate)
-    plot_trace(run, 'ips', 'IPS', 'IPS', lambda: get_ips_traces(run), active_cores, yMin=0, yMax=8e9, force_recreate=force_recreate)
-    plot_trace(run, 'ipssmooth', 'Smoothed IPS', 'Smoothed IPS', lambda: get_ips_traces(run), active_cores, yMin=0, yMax=8e9, smooth=10, force_recreate=force_recreate)
+    plot_core_trace(run, 'frequency', 'Frequency', 'Frequency (GHz)', lambda: resultlib.get_core_freq_traces(run), active_cores, yMin=0, yMax=4.1e9, force_recreate=force_recreate)
+    plot_core_trace(run, 'core_temperature', 'Core temperature', 'Core Temperature (C)', lambda: resultlib.get_core_temperature_traces(run), active_cores, yMin=45, yMax=100, force_recreate=force_recreate)
+    plot_named_traces(run, 'all_temperatures', 'All temperatures', 'Temperature (C)', lambda: resultlib.get_all_temperature_traces(run), yMin=45, yMax=100, force_recreate=force_recreate)
+    plot_core_trace(run, 'core_rvalues', 'Core R-values', 'Reliability', lambda: resultlib.get_rvalues_traces(run), active_cores, force_recreate=force_recreate, xlabel='time (ms) * acceleration factor')
+    plot_named_traces(run, 'all_rvalues', 'All R-values', 'Reliability', lambda: resultlib.get_all_rvalues_traces(run), force_recreate=force_recreate, xlabel='time (ms) * acceleration factor')
+    plot_core_trace(run, 'core_power', 'Core power', 'Power (W)', lambda: resultlib.get_core_power_traces(run), active_cores, yMin=0, force_recreate=force_recreate)
+    plot_core_trace(run, 'core_utilization', 'Core utilization', 'Core Utilization', lambda: resultlib.get_core_utilization_traces(run), active_cores, yMin=0, force_recreate=force_recreate)
+    plot_core_trace(run, 'cpi', 'CPI', 'CPI', lambda: resultlib.get_cpi_traces(run), active_cores, yMin=0, force_recreate=force_recreate)
+    plot_core_trace(run, 'ips', 'IPS', 'IPS', lambda: resultlib.get_ips_traces(run), active_cores, yMin=0, yMax=8e9, force_recreate=force_recreate)
+    # plot_core_trace(run, 'ipssmooth', 'Smoothed IPS', 'IPS', lambda: resultlib.get_ips_traces(run), active_cores, yMin=0, yMax=8e9, smooth=10, force_recreate=force_recreate)
     plot_cpi_stack_trace(run, active_cores, force_recreate=force_recreate)
 
 
 if __name__ == '__main__':
-    for run in sorted(get_runs())[::-1]:
+    for run in sorted(resultlib.get_runs())[::-1]:
         create_plots(run)
